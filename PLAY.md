@@ -110,6 +110,13 @@ out a descent you are watching happen. Either way the view does not scroll
 sideways: the whole 160-pixel world wraps around at the edges, so flying off the
 left takes you to the right.
 
+The sky is not empty. A field of stars fills everything above the ground, and it
+is there to be **read**. High up, the ground is off the screen entirely and the
+ship is the only other thing moving, so a descent at a steady few pixels a frame
+looks like hovering — the ground arrives by surprise. The stars are fixed to the
+world, so how fast they travel past you is your speed: in **LANDER** they stand
+still and the ship crosses them, in **DESCENT** they scroll up with the ground.
+
 ## If you keep crashing
 
 - **Landing hard on a pad?** Watch VY. It needs to be small by the time ALT

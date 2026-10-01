@@ -670,7 +670,55 @@ static void build_hud(void)
  *
  * World COLUMN N is screen column N: there is still no horizontal camera, and
  * the world wraps in 160 px at the same seam it always did.  Only the ROWS are
- * wound through the map. */
+ * wound through the map.
+ *
+ * THE SKY IS NOT BLANK, and that is the one thing here that is not about
+ * terrain.  Above the surface the ship is the only thing that moves, so a
+ * descent at a steady few px a frame reads as hovering and the ground arrives
+ * by surprise; star_cells[] is what there is to measure against.  It is
+ * indexed by WORLD row -- `& (STAR_ROWS-1)`
+ * and not `%`, because STAR_ROWS is a power of two and SDCC turns the modulo
+ * into __divuint for a wrap worth one instruction -- which is what lets ONE
+ * line serve both modes: LANDER's camera is pinned and its stars stand still
+ * while the ship moves past them, DESCENT's scrolls and they travel with the
+ * terrain.  A world row the ring re-blits after wrapping gets the same stars
+ * back rather than a reshuffled sky, which is the whole reason the pattern is a
+ * function of the world and not of the screen.
+ *
+ * THE STARS GO IN AFTER THE LOOP AND NOT IN IT, which is the whole cost
+ * argument and it is a measurement, not a preference.  This loop runs twenty
+ * times per row, and ring_stream() writes a row a tick -- two on the free fall
+ * probe.p13_descent measures -- so anything added per CELL is added forty times
+ * a tick in the mode with the least frame budget to spare.  That check sits on
+ * its last allowed frame: with the sky simply blank it reads 125 ticks in 126
+ * emulated frames.  A tick here is on the vblank boundary, so a few hundred
+ * cycles is the difference between fitting and waiting a whole frame for the
+ * next one.
+ *
+ * So mklevel.py emits the stars as the COLUMN, TILE pairs that are actually
+ * stars -- one or two a row out of twenty -- and this reads them off the end of
+ * the loop.  The loop keeps the shape it had when the sky was blank, and the
+ * stars cost what the one or two of them cost.  The `== T_BLANK` test is how a
+ * star knows it is standing on sky: the loop has just put T_BLANK under it, and
+ * a cell it filled with terrain is not sky at this world row and must not be
+ * star'd over.
+ *
+ * TWO THINGS HAD TO BE MOVED TO FIT IN THAT FRAME, and both are measured
+ * rather than reasoned.  The list, because a WORLD_COLS-wide row to copy read
+ * 125 in 127.  And then STAR_ODDS, because the compact list at 41 stars STILL
+ * read 125 in 127 -- the per-star work in this loop is the whole cost, and
+ * probe.p13_descent is where the budget for it is set.  At 28 stars it reads
+ * the 126 a blank sky reads.  mklevel.py carries the numbers; changing either
+ * one means re-running `make probe`, not just `make level`. */
+static void star_restore(uint8_t wr)
+{
+    const uint8_t *star = star_cells[wr & (STAR_ROWS - 1)];
+
+    for (; *star != STAR_END; star += 2)
+        if (rowbuf[star[0]] == T_BLANK)
+            rowbuf[star[0]] = star[1];
+}
+
 static void row_blit(uint8_t wr)
 {
     uint8_t col;
@@ -681,6 +729,8 @@ static void row_blit(uint8_t wr)
         rowbuf[col] = (wr < surface) ? T_BLANK
                     : (wr == surface) ? T_TERRAIN_TOP : T_TERRAIN;
     }
+
+    star_restore(wr);
 
     /* `wr & (MAP_ROWS - 1)` and NOT a plain `wr`: the world is 101 rows and the
      * map is 32, so the row a world row goes in is its own index taken modulo

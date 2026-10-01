@@ -21,10 +21,11 @@ TILES = []          # TILES[i] is 16 bytes; the index IS the BG tile id
 NAMES = []          # (define name, tile id), for the generated #defines
 DRAWN = set()       # ids put() was actually asked for
 
-# The id gap between the terrain tiles and the font.  Named because the
-# self-check below asserts the gap is exactly these ids and nothing else: a
-# typo'd id would otherwise grow the array and shift the numbering in silence.
-GAP = list(range(3, 20))
+# The id gap between the terrain tiles and the font, less the four the stars
+# took (3..6).  Named because the self-check below asserts the gap is exactly
+# these ids and nothing else: a typo'd id would otherwise grow the array and
+# shift the numbering in silence.
+GAP = list(range(7, 20))
 
 BLANK = ["........"] * 8
 
@@ -84,6 +85,50 @@ put(2, ["11111111",
         "#2######",
         "########",
         "2#######"], "T_TERRAIN_TOP")
+
+# ------------------------------------------------------------------ stars
+# FOUR variants, and the count is the point.  One star tile would put every
+# star at the same offset inside its own 8x8 cell, so the dots would land on a
+# perfect 8 px lattice and the sky would read as a machined grid rather than as
+# a field.  Four offsets break the lattice; two are drawn bright ('#') and two
+# dim ('2'), so the sky has a little depth instead of being a flat scatter.
+#
+# They sit on 3..6, inside the gap that was already reserved between the
+# terrain and the font, so the digit and letter numbering tools/probe.py and
+# the HUD both spell out does not move.  tools/mklevel.py's star_field[] picks
+# between them per world cell; these are only the four shapes.
+put(3, ["........",
+        "..#.....",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........"], "T_STAR0")
+put(4, ["........",
+        "........",
+        "........",
+        "........",
+        "........",
+        "......#.",
+        "........",
+        "........"], "T_STAR1")
+put(5, ["........",
+        ".....2..",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........"], "T_STAR2")
+put(6, ["........",
+        "........",
+        "........",
+        "........",
+        "........",
+        "........",
+        ".2......",
+        "........"], "T_STAR3")
 
 # ------------------------------------------------------------------- font
 # 5x7 glyphs, inset one column from the left and two from the right, so a row
@@ -204,9 +249,19 @@ SPRITES = [enc(render_ship(h)) for h in range(ROT_STEPS)]
 NTILES = 57
 TILE_IDS = sorted(DRAWN)
 assert len(TILES) == NTILES, "expected %d tile ids, got %d" % (NTILES, len(TILES))
-assert TILE_IDS == [0, 1, 2, 19] + list(range(20, NTILES)), (
+assert TILE_IDS == [0, 1, 2, 3, 4, 5, 6, 19] + list(range(20, NTILES)), (
     "unaccounted tile ids: %r" % (sorted(set(range(NTILES)) - DRAWN - set(GAP))))
 assert max(TILE_IDS) < 128, "tile id %d >= 128 reads the sprite bank" % max(TILE_IDS)
+
+# The ONE number the two generators share.  tools/mklevel.py's star_field[] is
+# emitted in TILE ID space -- main.c writes a sky cell straight from it, with no
+# mapping step, because that loop runs once per cell of every streamed row -- so
+# its STAR_BLANK/STAR_TILE0 have to agree with the ids below.  A renumbering of
+# the gap would otherwise move the stars out from under a sky that still points
+# at where they used to be: every star would silently become a digit.
+_IDS = dict(NAMES)
+assert _IDS["T_BLANK"] == 0, "mklevel.py's STAR_BLANK says 0, this says %d" % _IDS["T_BLANK"]
+assert _IDS["T_STAR0"] == 3, "mklevel.py's STAR_TILE0 says 3, this says %d" % _IDS["T_STAR0"]
 
 # The ship headings.  Two things can be wrong here and both are invisible on a
 # screenshot: a "rotation" that stopped rotating (sixteen copies of one frame),
@@ -246,7 +301,8 @@ lines = [
     "",
     "/* BG tile ids, all < 128: LCDC.4 = 0 puts BG tile data in the 0x9000 page,",
     " * and an id >= 128 would alias into the sprite bank at 0x8000 instead.",
-    " * 3..18 are the unused gap between the terrain tiles and the font. */",
+    " * 3..6 are the stars, 7..18 the unused gap up to the font, and 20/30 start",
+    " * the digit and letter runs glyph() indexes into. */",
     "#define GFX_TILE_COUNT %d" % len(TILES),
 ]
 for name, val in NAMES:

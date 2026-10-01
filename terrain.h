@@ -67,4 +67,52 @@ static const Pad pads[PAD_COUNT] = {
     { 13, 14, 2 },  /* HIGH */
 };
 
+/* THE SKY.  main.c's row_blit() indexes this with
+ * `world row & (STAR_ROWS - 1)`, so row N here is the sky at world rows
+ * N, N + 16, N + 32 ... and the pattern REPEATS every 16 rows -- which is
+ * what keeps the list 144 bytes instead of one row per row of world, and
+ * lets it be a pure function of a WORLD row.  DESCENT streams its rows in
+ * whatever order the camera asks for and re-blits them as the ring wraps,
+ * so a table the ring had to carry would come back shuffled.
+ *
+ * THE LIST IS `column, tile` PAIRS, terminated by STAR_END (255), and not
+ * a WORLD_COLS-wide row: row_blit() runs once per streamed row per tick
+ * and probe.p13_descent's free-fall tick sits on the last frame it is
+ * allowed, so the loop copies the 28 cells that ARE stars and not the 320
+ * that are not.  Row N is padded out with STAR_END after its pairs and is
+ * always read from the start, so the padding costs nothing.
+ *
+ * THE VALUES ARE TILE IDS, not indices: 3..6 are mkgfx.py's four stars
+ * (two of them drawn dim, so the field has depth) and T_BLANK (0) is the
+ * sky the loop already wrote.  28 of the 320 cells carry one.  mkgfx.py
+ * asserts its own ids against those.
+ *
+ * NOT a hash of (row, col) -- a shift-and-XOR hash is linear over GF(2)
+ * and the cells it picks land on a regular diagonal lattice.  It is an LCG
+ * in tools/mklevel.py from a fixed seed instead, and `make level`
+ * reproduces it byte for byte.  See that function for the argument. */
+#define STAR_ROWS 16
+#define STAR_TILES 4
+#define STAR_END 255
+#define STAR_STRIDE 9
+
+static const uint8_t star_cells[STAR_ROWS][STAR_STRIDE] = {
+    { 4, 4, 255, 255, 255, 255, 255, 255, 255 },
+    { 5, 3, 255, 255, 255, 255, 255, 255, 255 },
+    { 10, 4, 255, 255, 255, 255, 255, 255, 255 },
+    { 10, 4, 255, 255, 255, 255, 255, 255, 255 },
+    { 9, 6, 255, 255, 255, 255, 255, 255, 255 },
+    { 255, 255, 255, 255, 255, 255, 255, 255, 255 },
+    { 8, 5, 255, 255, 255, 255, 255, 255, 255 },
+    { 10, 5, 255, 255, 255, 255, 255, 255, 255 },
+    { 0, 5, 4, 3, 8, 6, 12, 6, 255 },
+    { 2, 5, 18, 5, 19, 6, 255, 255, 255 },
+    { 4, 3, 5, 4, 16, 5, 255, 255, 255 },
+    { 18, 4, 19, 6, 255, 255, 255, 255, 255 },
+    { 3, 5, 19, 6, 255, 255, 255, 255, 255 },
+    { 4, 4, 5, 4, 255, 255, 255, 255, 255 },
+    { 12, 4, 15, 5, 255, 255, 255, 255, 255 },
+    { 3, 4, 8, 5, 17, 6, 255, 255, 255 },
+};
+
 #endif

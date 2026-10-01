@@ -65,6 +65,45 @@ PADS = [
     ("HIGH", 13, 14, 2),
 ]
 
+# ------------------------------------------------------------- starfield ---
+# THE SKY IS NOT EMPTY.  Above each profile's surface, LANDER leaves 9 rows of
+# blank tile and DESCENT about 96 -- and a ship falling through unmarked space
+# has nothing to measure itself against.  On a 160x144 screen the ship is the
+# only thing in the sky that moves, so a descent at a steady pace reads as
+# hovering and the ground arrives by surprise.  A star in some of the sky cells
+# is the reference, and it is nearly free: main.c is writing every one of those
+# cells anyway.
+#
+# IT IS A WORLD PATTERN, not a screen one -- star_field[world row & 15][col].
+# LANDER's camera is pinned, so its stars stand still and the SHIP moves past
+# them; DESCENT's scrolls, so they travel with the terrain.  Same table, same
+# row_blit() line, both modes.  Indexing by world row is also what lets DESCENT
+# re-blit a streamed row and get the SAME stars back -- a screen-space pattern
+# would reshuffle the sky every time the camera moved.
+#
+# STAR_ROWS is a power of two so main.c's index is an AND rather than a %.
+STAR_ROWS = 16              # the pattern's period in world rows
+STAR_TILES = 4              # mkgfx.py draws T_STAR0..3; the field says WHICH
+# 1 sky cell in 12 carries one.  NOT a taste call: this number is half the frame
+# budget for p13_descent's free-fall tick.  Measured, on the compact list main.c
+# actually reads -- 8 (41 stars) fails p13 at 127 emulated frames, 12 (28) and
+# 16 (20) both read the 126 that a blank sky reads.  Changing it means
+# re-running `make probe`, not just `make level`.
+STAR_ODDS = 12
+
+# The field is emitted in TILE ID SPACE -- 0 for sky, 3..6 for the four stars --
+# and not as 0..4 indices into mkgfx.py's tiles, even though the two generators
+# otherwise keep their numbering to themselves.  It is worth the coupling:
+# main.c's row_blit() runs this lookup once per sky cell on every streamed row,
+# and the mapping step is a SECOND table read per cell.  Measured through
+# probe.p13_descent's tick-rate check, a free-falling DESCENT life kept 126 of
+# 128 emulated frames with the field holding tile ids, against 128 of 170 with
+# it holding indices -- one extra read a cell was most of a 25% slowdown.  These
+# two constants are the whole of the coupling, and mkgfx.py asserts its own
+# numbering against them.
+STAR_BLANK = 0              # T_BLANK
+STAR_TILE0 = 3              # T_STAR0
+
 # The profiles, and each world's own x1/x2 pad row.  x2 sits ABOVE x1 in both,
 # because the multiplier -> row map is the contract probe.p2_terrain mirrors: a
 # x2 pad is a smaller, higher platform than a x1 pad.
@@ -200,6 +239,83 @@ def self_check(p, terrain):
         % (name, abs(profile(p["base"], 0) - profile(p["base"], WORLD_COLS - 1)))
 
 
+def build_stars():
+    """The star field, from a fixed seed, so `make level` is reproducible.
+
+    An LCG and NOT a hash of (row, col), which is the obvious way to write this
+    and the wrong one: every shift-and-XOR hash is linear over GF(2), so the
+    cells it selects out of a small range form a lattice -- the stars come out
+    on a regular diagonal grid, which is the one thing a starfield must not
+    look like.  Breaking that needs a non-linear step, and a multiply is the
+    cheapest one there is."""
+    state = 0x5EED
+    field = []
+    for _r in range(STAR_ROWS):
+        row = []
+        for _c in range(WORLD_COLS):
+            state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+            # STAR_ODDS is the SPARSITY, not the hit rate: one draw in
+            # STAR_ODDS cells gets a star and the rest stay sky, which is the
+            # way round it is easy to write backwards -- the check below is
+            # what caught it the first time.
+            if (state >> 16) % STAR_ODDS:
+                row.append(STAR_BLANK)
+            else:
+                row.append(STAR_TILE0 + (state >> 8) % STAR_TILES)
+        field.append(row)
+    return field
+
+
+STAR_FIELD = build_stars()
+STARS = sum(1 for r in STAR_FIELD for v in r if v)
+STAR_CELLS = STAR_ROWS * WORLD_COLS
+
+# The field's self-checks, and the shape of the table is the one that is easy
+# to get wrong in silence: a row that is not WORLD_COLS wide wraps the sky at
+# the wrong column, and a value past STAR_TILES indexes off the end of
+# mkgfx.py's star tiles into whatever tile id happens to be next.
+assert len(STAR_FIELD) == STAR_ROWS, "the field is not STAR_ROWS rows"
+assert all(len(r) == WORLD_COLS for r in STAR_FIELD), \
+    "a star row is not WORLD_COLS wide -- the sky would wrap at the wrong column"
+assert all(v in ({STAR_BLANK} | set(range(STAR_TILE0, STAR_TILE0 + STAR_TILES)))
+           for r in STAR_FIELD for v in r), \
+    "a cell is neither blank nor one of the %d star tile ids" % STAR_TILES
+# The SAME field again as a compact per-row list of `column, tile` pairs,
+# terminated by STAR_END.  This is the form main.c reads, and the reason is a
+# measurement rather than a preference: main.c's row_blit() runs once per
+# streamed row per tick, and probe.p13_descent's free-fall tick sits on exactly
+# the last frame the check allows -- 126 emulated frames advancing the tick
+# counter by 125, with the sky simply blank.  Handing that loop a WORLD_COLS-
+# wide row to copy cost it that frame and the check went red.
+#
+# The compact list is the necessary half of the answer and not the whole of it:
+# STAR_ODDS is the other half and it is measured too.  At 8 (41 stars) the loop
+# is still 2-3 cells a row too wide and p13 fails at 127 frames; at 12 (28) it
+# reads 126/125, the same number the sky with no stars at all reads -- the star
+# work is inside the tick again.  So the sparsity IS the frame budget here, and
+# moving STAR_ODDS down without re-running p13 is how this gets broken.
+#
+# The wide field above is still what the checks grade -- the list is derived
+# from it, never the other way, so the density assertion still covers what
+# ships.
+STAR_END = 0xFF                 # column 0..19 can never collide with it
+STAR_LIST = [[[c, v] for c, v in enumerate(_row) if v] for _row in STAR_FIELD]
+STAR_STRIDE = 2 * max(len(r) for r in STAR_LIST) + 1
+# A row with no stars is legal -- row 4 is one -- and is just its terminator.
+# The floor only guards the degenerate table where EVERY row is empty, which
+# would leave a stride of 1 and a table with no room to say anything.
+assert STAR_STRIDE >= 3, "every star row is empty -- the table says nothing"
+assert all(len(r) <= (STAR_STRIDE - 1) // 2 for r in STAR_LIST), \
+    "a star row is wider than STAR_STRIDE -- the pairs would run off the end"
+assert sum(len(r) for r in STAR_LIST) == STARS, \
+    "the compact list and the field disagree about how many stars there are"
+
+assert 0.05 <= STARS / float(STAR_CELLS) <= 0.25, (
+    "the sky came out %.0f%% stars; a generator that emitted none of them, or "
+    "all of them, would still build and still pass everything else"
+    % (100.0 * STARS / STAR_CELLS))
+
+
 # ------------------------------------------------------------- generate ----
 built = [(p, build(p)) for p in PROFILES]
 for _p, _t in built:
@@ -287,10 +403,58 @@ lines.append("")
 lines.append("static const Pad pads[PAD_COUNT] = {")
 for name, col0, col1, mult in PADS:
     lines.append("    { %2d, %2d, %d },  /* %s */" % (col0, col1, mult, name))
+lines += ["};", ""]
+
+lines += [
+    "/* THE SKY.  main.c's row_blit() indexes this with",
+    " * `world row & (STAR_ROWS - 1)`, so row N here is the sky at world rows",
+    " * N, N + %d, N + %d ... and the pattern REPEATS every %d rows -- which is"
+    % (STAR_ROWS, 2 * STAR_ROWS, STAR_ROWS),
+    " * what keeps the list %d bytes instead of one row per row of world, and"
+    % (STAR_ROWS * STAR_STRIDE),
+    " * lets it be a pure function of a WORLD row.  DESCENT streams its rows in",
+    " * whatever order the camera asks for and re-blits them as the ring wraps,",
+    " * so a table the ring had to carry would come back shuffled.",
+    " *",
+    " * THE LIST IS `column, tile` PAIRS, terminated by STAR_END (%d), and not"
+    % STAR_END,
+    " * a WORLD_COLS-wide row: row_blit() runs once per streamed row per tick",
+    " * and probe.p13_descent's free-fall tick sits on the last frame it is",
+    " * allowed, so the loop copies the %d cells that ARE stars and not the %d"
+    % (STARS, STAR_CELLS),
+    " * that are not.  Row N is padded out with STAR_END after its pairs and is",
+    " * always read from the start, so the padding costs nothing.",
+    " *",
+    " * THE VALUES ARE TILE IDS, not indices: %d..%d are mkgfx.py's four stars"
+    % (STAR_TILE0, STAR_TILE0 + STAR_TILES - 1),
+    " * (two of them drawn dim, so the field has depth) and T_BLANK (%d) is the"
+    % STAR_BLANK,
+    " * sky the loop already wrote.  %d of the %d cells carry one.  mkgfx.py"
+    % (STARS, STAR_CELLS),
+    " * asserts its own ids against those.",
+    " *",
+    " * NOT a hash of (row, col) -- a shift-and-XOR hash is linear over GF(2)",
+    " * and the cells it picks land on a regular diagonal lattice.  It is an LCG",
+    " * in tools/mklevel.py from a fixed seed instead, and `make level`",
+    " * reproduces it byte for byte.  See that function for the argument. */",
+    "#define STAR_ROWS %d" % STAR_ROWS,
+    "#define STAR_TILES %d" % STAR_TILES,
+    "#define STAR_END %d" % STAR_END,
+    "#define STAR_STRIDE %d" % STAR_STRIDE,
+    "",
+    "static const uint8_t star_cells[STAR_ROWS][STAR_STRIDE] = {",
+]
+for _row in STAR_LIST:
+    _flat = [b for _c, _t in _row for b in (_c, _t)]
+    _flat += [STAR_END] * (STAR_STRIDE - len(_flat))
+    lines.append("    { " + ", ".join("%d" % v for v in _flat) + " },")
 lines += ["};", "", "#endif", ""]
 
 with open("terrain.h", "w") as f:
     f.write("\n".join(lines))
+
+print("star_cells: %d rows x %d, %d stars, list %d bytes of %d"
+      % (STAR_ROWS, STAR_STRIDE, STARS, STAR_ROWS * STAR_STRIDE, STAR_CELLS))
 
 for p, t in built:
     print("%-8s %s: rows %d..%d, pads %s"
@@ -299,3 +463,5 @@ for p, t in built:
                        for n, a, b, m in PADS)))
 print("terrain.h: %d columns, %d pads, two profiles, one `terrain` pointer"
       % (WORLD_COLS, len(PADS)))
+print("star_field: %dx%d, %d stars (%.0f%% of sky cells)"
+      % (STAR_ROWS, WORLD_COLS, STARS, 100.0 * STARS / STAR_CELLS))

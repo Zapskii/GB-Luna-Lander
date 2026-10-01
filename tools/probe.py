@@ -64,7 +64,23 @@ OAM_DY, OAM_DX = 16, 8          # an 8x8 sprite DRAWS at (x-8, y-16), so the
 T_BLANK = 0
 T_TERRAIN = 1
 T_TERRAIN_TOP = 2
+T_STAR0, STAR_TILES = 3, 4      # mkgfx.py's star tiles, in the id gap
 T_DIGIT0, T_LETTER0, T_MINUS = 20, 30, 56
+
+# THE SKY IS A SET, NOT A TILE.  A cell above the surface is T_BLANK or one of
+# the four star tiles, and WHICH one is tools/mklevel.py's star_field[], indexed
+# by world row.  That is a pattern and not a rule, so these checks assert the
+# CATEGORY -- a sky cell is always a sky tile and never terrain -- and leave the
+# exact scatter to mklevel.py's own self-check.  Restating the generator's LCG
+# here would buy nothing and be a second copy of it to keep in step.
+#
+# What the probe does add is the COUNT: that the stars are really on the screen
+# and not merely in the header.  A floor and not the exact 29, because the
+# scatter is the generator's to change -- the number this has to stay clear of
+# is 0, which is what a ROM with no starfield has.
+STAR_IDS = frozenset(range(T_STAR0, T_STAR0 + STAR_TILES))
+SKY_IDS = frozenset({T_BLANK}) | STAR_IDS
+MIN_STARS = 8
 
 # terrain.h's geometry, mirrored for the same reason: tools/mklevel.py,
 # terrain.h and this file are the second three-way contract.  A probe that read
@@ -573,19 +589,29 @@ def p1_boot(g):
     # terrain from row 0 down, so the skip is gone with the reason for it.
     seen = set()
     ground = 0
+    stars = 0
     for y in range(VIEW_H):
         for x in range(VIEW_W):
             t = g.tile(x, y)
             seen.add(t)
             if t in (T_TERRAIN, T_TERRAIN_TOP):
                 ground += 1
-    extra = sorted(seen - {T_BLANK, T_TERRAIN, T_TERRAIN_TOP})
+            elif t in STAR_IDS:
+                stars += 1
+    extra = sorted(seen - SKY_IDS - {T_TERRAIN, T_TERRAIN_TOP})
     check(not extra,
           "the first screen holds only generated tiles -- nothing from an "
           "unloaded bank (%r is on screen)" % extra)
     check(ground >= VIEW_W,
           "and the generated ground is really drawn (%d of %d cells, at least "
           "one surface tile per column)" % (ground, VIEW_W * VIEW_H))
+    check(stars >= MIN_STARS,
+          "and the sky above it is NOT empty -- %d star cells on the first "
+          "screen, against the %d floor a screen with no starfield at all "
+          "would miss by every one.  The ship is the only thing in that sky "
+          "that moves, so a blank one is a fall with nothing to measure it "
+          "against: at a steady few px a frame it reads as hovering"
+          % (stars, MIN_STARS))
 
 
 # ------------------------------------------------------------------ P2 -----
@@ -631,10 +657,13 @@ def p2_terrain(g):
     bad = []
     for x in range(WORLD_COLS):
         for y in range(VIEW_H):
-            want = (T_BLANK if y < h[x] else
-                    T_TERRAIN_TOP if y == h[x] else T_TERRAIN)
-            if g.tile(x, y) != want:
-                bad.append((x, y, want, g.tile(x, y)))
+            t = g.tile(x, y)
+            # SKY is a category and not one tile now -- see SKY_IDS.  Surface
+            # and body are still exact: those two are the profile's answer.
+            ok = (t in SKY_IDS if y < h[x] else
+                  t == T_TERRAIN_TOP if y == h[x] else t == T_TERRAIN)
+            if not ok:
+                bad.append((x, y, "sky" if y < h[x] else h[x], t))
     check(not bad,
           "the whole column is sky/surface/body exactly as terrain[col] says -- "
           "col:row:want:found %r" % bad[:5])
@@ -1438,14 +1467,15 @@ def p9_window(g):
     for x in range(WORLD_COLS):
         for y in range(VIEW_H):
             wr = top + y
-            want = (T_BLANK if wr < descent[x] else
-                    T_TERRAIN_TOP if wr == descent[x] else T_TERRAIN)
             got = g.tile(x, slot(wr))
-            if got != want:
-                bad.append((x, y, wr, want, got))
+            ok = (got in SKY_IDS if wr < descent[x] else
+                  got == T_TERRAIN_TOP if wr == descent[x] else
+                  got == T_TERRAIN)
+            if not ok:
+                bad.append((x, y, wr, descent[x], got))
     check(not bad,
           "the whole window is sky/surface/body exactly as the profile and the "
-          "offset say -- col:row:world-row:want:found %r" % (bad[:5]))
+          "offset say -- col:row:world-row:surface-row:found %r" % (bad[:5]))
 
     # The offset is not decoration: at the top of the world the descent shows no
     # ground at all, which is what a life that opens there would be looking at.
@@ -1722,11 +1752,12 @@ def p11_stream(g):
             wr = top + r
             mr = wr & (MAP_TILES - 1)
             for c in range(WORLD_COLS):
-                want = (T_BLANK if wr < descent[c] else
-                        T_TERRAIN_TOP if wr == descent[c] else T_TERRAIN)
                 got = g.tile(c, mr)
-                if got != want:
-                    out.append((c, r, wr, mr, want, got))
+                ok = (got in SKY_IDS if wr < descent[c] else
+                      got == T_TERRAIN_TOP if wr == descent[c] else
+                      got == T_TERRAIN)
+                if not ok:
+                    out.append((c, r, wr, mr, descent[c], got))
         return out
 
     # ---- the descent, sampled every tick ---------------------------------
@@ -2174,11 +2205,12 @@ def p13_descent(g):
             wr = top + r
             mr = wr & (MAP_TILES - 1)
             for c in range(WORLD_COLS):
-                want = (T_BLANK if wr < descent[c] else
-                        T_TERRAIN_TOP if wr == descent[c] else T_TERRAIN)
                 got = g.tile(c, mr)
-                if got != want:
-                    out.append((c, r, wr, mr, want, got))
+                ok = (got in SKY_IDS if wr < descent[c] else
+                      got == T_TERRAIN_TOP if wr == descent[c] else
+                      got == T_TERRAIN)
+                if not ok:
+                    out.append((c, r, wr, mr, descent[c], got))
         return out
 
     # ---- into the DESCENT half --------------------------------------------

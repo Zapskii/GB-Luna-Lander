@@ -30,6 +30,16 @@ Both are the same game over two profiles, and P12's boot default is a single
 `pick` byte: the title's mode line, the profile the renderer and the collision
 read, and the world the camera clamps against are one answer from the first tick.
 
+The sky is one line in both modes. `row_blit()` writes the stars out of
+`terrain.h`'s `star_cells[]`, indexed by **world** row — so LANDER's pinned
+camera leaves them standing still while the ship crosses them, DESCENT's scrolls
+them with the terrain, and a row the ring re-blits after wrapping gets the same
+stars back instead of a reshuffled sky. They are a motion reference: at the top
+of a fall the ground is off the screen and the ship is the only other thing
+moving, so a steady few pixels a frame reads as hovering. The density is not a
+taste call — the free-fall tick in `probe.p13_descent` has one frame of
+tolerance and `tools/mklevel.py` carries the measurement that spends it.
+
 The two modes are meant to differ only in their level data and their camera,
 and M1 is where that bet had to be made good on. Terrain is one array of surface
 heights in **8 px tile units**, and the type reaches 255 of them — far more than
@@ -115,11 +125,11 @@ to *play* the game, and `make` on its own builds the ROM with no Python at all.
 |---|---|
 | `main.c` | Everything that touches hardware: boot, the tick loop, input, rendering, the HUD and the sound |
 | `sim.h` | THE RULES — pure C, `<stdint.h>` only, never `gb/gb.h`. Sub-pixel stepping, gravity, thrust, fuel, the wrap and the landing verdict |
-| `tools/mklevel.py` | Generates `terrain.h`: the height profile and the pad table, with self-checks |
+| `tools/mklevel.py` | Generates `terrain.h`: the height profile, the pad table and the star field, with self-checks |
 | `terrain.h` | Generated, committed — a plain `make` needs no Python |
 | `tools/mktab.py` | Generates `tables.h`: the 16 thrust unit vectors |
 | `tables.h` | Generated, committed |
-| `mkgfx.py` | Generates `gfx.h`: the font, the terrain tiles and the 16 ship frames |
+| `mkgfx.py` | Generates `gfx.h`: the font, the terrain tiles, the four star tiles and the 16 ship frames |
 | `gfx.h` | Generated, committed. Included by `main.c` only |
 | `tests/test_sim.c` | Host tests for the physics and the landing rule |
 | `tools/probe.py` | Headless emulator checks: the wiring between `sim.h` and `main.c` |
