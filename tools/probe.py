@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless check harness for LUNA LANDEER.
+"""Headless check harness for LUNA LANDER.
 
 WHY THIS EXISTS: tools/shot.py takes a picture, which only tells you the screen
 is not blank.  This drives the game and reads the game's OWN variables out of the
@@ -100,15 +100,54 @@ GROUND_IDS = frozenset({T_TERRAIN, T_TERRAIN_TOP, T_PAD_TOP})
 # WORLD_COLS is 160 px / 8 px per tile.  NOT a power of two -- 160 is not 256 --
 # which is why the wrap in sim.h is two compares and never an & WORLD_MASK.
 WORLD_COLS = 20
+# Three slots per level, and a level that declares fewer pads than that fills
+# the rest with a sentinel whose col0 is 255 -- no column of a 20-wide world can
+# be <= a col1 for it, so sim.h's pad_mult() walks past it exactly as it does
+# for bare ground.  PAD_SENTINEL is the number the generator writes, mirrored
+# here for the same reason WORLD_COLS is: a probe that read terrain.h could not
+# tell a table that lost its padding from one that never had any.
 PAD_COUNT = 2
-PAD_ROW = {1: 15, 2: 12}        # multiplier -> the surface row that pad sits at,
-                                # for the LANDER profile p2_terrain runs against
+PAD_SENTINEL = 0xFF
+# THERE IS NO PAD ROW TABLE HERE ANY MORE, and its absence is the change.  The
+# multiplier->row convention used to be one pair of constants for one world per
+# mode; with twelve levels a chain it is per level, and a copy kept here would
+# be twenty-four numbers mirrored on the far side of the question p2 is asking.
+# The row is read off the ACTIVE profile instead -- h[col0] -- which is the
+# strictly better question: it asks whether the ROM's pads table agrees with the
+# ROM's own terrain, and that is the agreement the renderer and sim.h's
+# collision both stand on.
 
 
 def rom_pads(g):
-    """terrain.h's pads[] exactly as the ROM was built with it."""
-    raw = g.var("pads", PAD_COUNT * 3)
+    """terrain.h's pads[] for the ACTIVE level, exactly as the ROM was built
+    with it.
+
+    `pads` is a POINTER as of the level system, the same as `terrain` and for
+    the same reason: one symbol the renderer, sim.h and this file all reach the
+    current level's table through.  Reading PAD_COUNT * 3 bytes at the symbol's
+    own address would hand back the pointer's two bytes and seven bytes of
+    whatever the linker put after it -- a plausible-looking table of small
+    numbers, which reads as a pad bug rather than as a dereference never taken.
+    See G.active_profile() for the same argument about `terrain`."""
+    a = g.u16("pads")
+    if a == 0:
+        # BOTH `pads` AND `terrain` LIVE IN WRAM and are copied there by the
+        # ROM's own startup code, so before the first frame they read as 0 and
+        # the six bytes at 0x0000 are the interrupt vectors -- small numbers in
+        # a plausible shape, which is the same trap active_profile() names.  A
+        # check that needs this BEFORE it has run a frame has a bug in the
+        # probe, not in the ROM: raise, so it exits 2 rather than grading a
+        # table of interrupt vectors.
+        raise RuntimeError("`pads` is still 0 -- the ROM's startup has not run; "
+                           "read the pad table after at least one frame")
+    raw = list(g.p.memory[a:a + PAD_COUNT * 3])
     return [(raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]) for i in range(PAD_COUNT)]
+
+
+def real_pads(spans):
+    """rom_pads() with the sentinel slots dropped -- the pads the level really
+    declares, which is what a check about pads means."""
+    return [s for s in spans if s[0] != PAD_SENTINEL]
 
 
 def surface_tile(col, spans):
@@ -280,6 +319,28 @@ DESCENT_LIMIT = 1500            # the scripted descent takes about 300
 # FUEL_START / FUEL_BURN ticks" rather than against a hardcoded count.
 FUEL_START = 600
 FUEL_BURN = 1
+
+# ...and main.c's LAP RAMP, which is the level system's ONE calibration knob.
+# Mirrored for the same reason the fuel economy above is: p16_levels asserts the
+# tank a cleared chain replays on IS FUEL_START - FUEL_LAP_STEP, so a ramp
+# retuned in main.c follows in the check's arithmetic instead of failing as a
+# complaint about the game.  FUEL_FLOOR is the clamp under it; nothing here
+# needs the number yet because no check flies more than two laps.
+FUEL_LAP_STEP = 60
+FUEL_FLOOR = 300
+
+# sim.h's landing threshold, mirrored.  The rule crashes a descent faster than
+# this, so the pilot p16_levels flies against -- three quarters of it -- arrives
+# with a quarter of the allowance still in hand.
+SAFE_VY_MAX = 128
+
+# terrain.h's Level row, mirrored the way WORLD_COLS and the tile ids are: a
+# pointer to the profile, a pointer to the pads, the spawn's x and its y, packed
+# with no padding -- SDCC does not align a struct's fields on the Z80, and the
+# linker map shows the twelve rows of levels_lander 72 bytes apart.  p16_levels
+# asserts the 6 against the ROM rather than trusting the mirror.
+LEVEL_ROW = 6
+LEVELS_PER_CHAIN = 12
 
 # tables.h's heading count and gfx.h's first ship tile, mirrored: the sprite
 # frame the PPU is told to draw is SPR_SHIP0 + heading, and that pairing is the
@@ -527,6 +588,27 @@ class Game:
         """The raw OAM bytes for one sprite slot: y, x, tile, attrs."""
         return list(self.p.memory[OAM + 4 * slot:OAM + 4 * slot + 4])
 
+    def profile_at(self, a):
+        """WORLD_COLS bytes of profile at an ARBITRARY address -- what a Level
+        row's own pointer field is pointing at, which is not a symbol this file
+        can name.  G.profile() is still the right reader when the question is
+        what the GENERATOR emitted; this one is for when the question is what a
+        table is pointing at."""
+        return list(self.p.memory[a:a + WORLD_COLS])
+
+    def level_row(self, chain, i):
+        """One row of levels_<chain>, field by field (see LEVEL_ROW)."""
+        a = self.addr["levels_%s" % chain] + i * LEVEL_ROW
+        b = list(self.p.memory[a:a + LEVEL_ROW])
+        return {"profile": b[0] | (b[1] << 8), "pads": b[2] | (b[3] << 8),
+                "spawn_x": b[4], "spawn_y": b[5]}
+
+    def pads_at(self, a):
+        """The PAD_COUNT-wide pad table at an arbitrary address."""
+        raw = list(self.p.memory[a:a + PAD_COUNT * 3])
+        return [(raw[3 * i], raw[3 * i + 1], raw[3 * i + 2])
+                for i in range(PAD_COUNT)]
+
     def tile(self, x, y, base=MAP0):
         """One tile id out of a tilemap.  WHICH map is a parameter and not a
         constant as of P12: the BG map holds terrain and the WINDOW map holds
@@ -762,17 +844,21 @@ def p2_terrain(g):
           "col:row:want:found %r" % bad[:5])
 
     # The pads.  Each is a flat run across its WHOLE width, and sits at the row
-    # its multiplier earns: a x2 pad at the x1 row is flat and wrong, which is
-    # the difference this reads the table for.
-    raw = g.var("pads", PAD_COUNT * 3)
-    for i in range(PAD_COUNT):
-        col0, col1, mult = raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]
-        row = PAD_ROW.get(mult)
-        if row is None or not col0 <= col1 < WORLD_COLS:
+    # the ACTIVE PROFILE has there -- which is the only row it could sit at and
+    # still be ground the ship can come to rest on.  A pad whose span is flat
+    # but one row off its own terrain[] is the failure this reads the table for,
+    # and it is a real one: sim.h's contact test reads terrain[col] and
+    # pad_mult(col) at the same column, so a table and a profile that disagreed
+    # would put the ship to rest one row above or below the deck it is standing
+    # on.
+    for i, (col0, col1, mult) in enumerate(rom_pads(g)):
+        if col0 == PAD_SENTINEL:
+            continue                    # an undeclared slot in a 3-wide table
+        row = h[col0]
+        if not col0 <= col1 < WORLD_COLS or mult not in (1, 2):
             check(False, "pad %d is malformed: cols %d..%d x%d, expected a span "
-                         "inside 0..%d and a multiplier in %r"
-                         % (i, col0, col1, mult, WORLD_COLS - 1,
-                            sorted(PAD_ROW)))
+                         "inside 0..%d and a multiplier in (1, 2)"
+                         % (i, col0, col1, mult, WORLD_COLS - 1))
             continue
         span = h[col0:col1 + 1]
         onscreen = [g.tile(x, h[x]) for x in range(col0, col1 + 1)]
@@ -1150,8 +1236,7 @@ def p5_landing(g):
     # here would make this a check on the comments.  As of P9 this is the
     # SELECTED profile, through the pointer rather than at the symbol.
     h = g.active_profile()
-    raw = g.var("pads", PAD_COUNT * 3)
-    pads = [(raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]) for i in range(PAD_COUNT)]
+    pads = rom_pads(g)
 
     s0 = g.ship()
     check(s0["x"] == SPAWN_X and s0["state"] == ST_FLY,
@@ -1343,7 +1428,7 @@ def p6_hud(g):
     g.run(150)                          # let main() run and draw the title
 
     # ---- the title -------------------------------------------------------
-    title = g.find_text("LUNA LANDEER")
+    title = g.find_text("LUNA LANDER")
     check(bool(title),
           "the title spells the game's name on the screen (%r)" % (title,))
     check(bool(g.find_text("PRESS START")),
@@ -1383,10 +1468,10 @@ def p6_hud(g):
     g.play()
     check(g.var("game") == ST_PLAY,
           "START clears the title (game %d)" % g.var("game"))
-    check(g.find_text("LUNA LANDEER") == [] and
+    check(g.find_text("LUNA LANDER") == [] and
           g.find_text("PRESS START") == [],
           "and the title's text is gone from the screen (%r, %r)"
-          % (g.find_text("LUNA LANDEER"), g.find_text("PRESS START")))
+          % (g.find_text("LUNA LANDER"), g.find_text("PRESS START")))
     # ...and the telemetry is in the WINDOW map, which is where P12 puts it.  The
     # string has to be looked for THERE and not in the BG map: the two maps are
     # 32x32 each and the same (x, y) in both is a different cell, so a "FUEL"
@@ -2475,7 +2560,6 @@ def p13_descent(g):
 
     lander = g.profile("terrain_lander")
     descent = g.profile("terrain_descent")
-    spans = rom_pads(g)          # closed over by band_bad, which runs per tick
     descent_h = (max(descent) + 1) * 8
     cam_max = descent_h - PLAY_H_PX
     lander_h = (max(lander) + 1) * 8
@@ -2523,6 +2607,14 @@ def p13_descent(g):
 
     # ---- into the DESCENT half --------------------------------------------
     g.run(150)
+    # THE PAD TABLE IS READ ONCE THE ROM IS UP, and not with the two profiles
+    # above, because those come out of ROM and this one is a WRAM POINTER --
+    # see rom_pads().  It is still read ONCE and closed over, which is the
+    # point: band_bad runs per tick, and a table re-read every tick could drift
+    # with the level and stop asking whether the renderer agreed with the data
+    # the level was opened on.  L1 of each chain shares these spans, which is
+    # what lets one read cover both halves.
+    spans = rom_pads(g)
     g.run(4, "T")               # SELECT: the tall world (an EDGE)
     g.run(2)                    # button-free: the next press is an EDGE too
     g.run(8, "S")               # START opens it
@@ -2636,9 +2728,9 @@ def p13_descent(g):
     # would pass the first comparison alone.  The pads' spans are shared by the
     # two worlds (terrain.h) and only their DEPTH differs, so this is the one
     # number a descent landing and a LANDER landing have in common.
-    raw = g.var("pads", PAD_COUNT * 3)
-    under = [raw[3 * i + 2] for i in range(PAD_COUNT)
-             if raw[3 * i] <= col <= raw[3 * i + 1]]
+    raw = rom_pads(g)
+    under = [m for (_c0, _c1, m) in raw
+             if _c0 != PAD_SENTINEL and _c0 <= col <= _c1]
     check(under and landed["mult"] == under[0] == 2,
           "and the descent's landing is SCORED -- x2 for the pad under the "
           "spawn (scored %d, the ROM's own pads table says %r)"
@@ -2724,6 +2816,18 @@ def p13_descent(g):
     # the whole way at once, because that push is horizontal and gravity is the
     # only thing on the vertical axis.  Every tick of it is on the DESCENT
     # profile: 752 px of air, and nothing in this flight brakes.
+    #
+    # IT COMES BACK THROUGH THE TITLE, and that is not incidental: START ON A
+    # LANDED PAGE ADVANCES THE CHAIN now, so the press that used to mean "the
+    # same world again" would put this flight on L2 and every assertion below
+    # would be grading it against L1's profile.  SELECT to the title and START
+    # from there resumes the level that was landed on -- DESCENT L1 -- so the
+    # second life is the first life's world, which is what the wrap checks are
+    # written against.  (It is also the check that progress is REMEMBERED: a
+    # title that reset would resume L1 here for the wrong reason and this would
+    # still pass, which is why p16_levels asks that question directly.)
+    g.run(4, "T")
+    g.run(2)
     g.run(8, "S")
     g.run(2)
     check(g.ship()["heading"] == 0 and g.ship()["fuel"] == FUEL_START,
@@ -2856,12 +2960,13 @@ BANK1_BASE = 0x4000             # this cart is ROM-only and never switches banks
 BANK1_END = 0x8000
 
 # The sizes the border blobs are linked at, read out of border_data.h BY HAND:
-# border_data_tiles[3616] (113 tiles), border_data_palettes[16], map[1792].  They
+# border_data_tiles[3808] (119 tiles), border_data_palettes[16], map[1792].  They
 # are the ART's sizes, so re-drawing art/border_sgb.png moves the first one and
 # this check fails with the number in hand -- which is the intended behaviour,
 # not a nuisance.  A border that quietly stopped being shipped looks exactly
 # like one that works, so the failure is what makes the picture re-looked-at.
-BORDER_TILES_BYTES = 3616
+# (It last moved on 2026-10-01, 3616 -> 3808, when the title lost its second E.)
+BORDER_TILES_BYTES = 3808
 BORDER_PAL_BYTES = 32
 BORDER_MAP_BYTES = 1792
 TILE_BYTES = 32                 # a 4bpp tile: the border's own tile unit
@@ -3136,9 +3241,9 @@ def p15_ending(g):
           "a second crash reaches its page too (game %d)" % g.var("game"))
     g.run(6, "T")                       # SELECT: the title (an EDGE)
     g.run(4)
-    check(g.var("game") == ST_TITLE and bool(g.find_text("LUNA LANDEER", MAP0)),
+    check(g.var("game") == ST_TITLE and bool(g.find_text("LUNA LANDER", MAP0)),
           "and SELECT leaves the page for the title -- game %d, %r"
-          % (g.var("game"), g.find_text("LUNA LANDEER", MAP0)))
+          % (g.var("game"), g.find_text("LUNA LANDER", MAP0)))
 
     # ---- the other ending, and a SECOND REASON ---------------------------
     # A different crash on purpose.  This pilot holds RIGHT for the whole fall
@@ -3206,13 +3311,289 @@ def p15_ending(g):
              [g.oam(slot)[0] for slot in range(BOOM_TILES)]))
 
 
+# ----------------------------------------------------------------- P16 -----
+# The pilot the chain walk flies.  Burn while the fall is faster than three
+# quarters of what the landing rule allows, straight down the column the level
+# spawned it on -- nothing here touches the d-pad, and every level puts its
+# spawn over a pad (mklevel.py rejects one that does not), so the ship lands on
+# that pad every time without a line of aiming.
+#
+# IT IS NOT P5's PILOT AND THE REASON IS THE RUNNING TIME.  VY_HOLD is a quarter
+# of SAFE_VY_MAX and walks a 72 px fall down in ~300 ticks; twelve of those is
+# 3600 emulated frames in the middle of a suite that already runs several
+# thousand.  Three quarters arrives with a quarter of the allowance in hand --
+# and the landing is asserted to be SAFE and not merely to happen, so a pilot
+# tuned past the rule fails here instead of quietly grading a crash.
+P16_BRAKE = SAFE_VY_MAX * 3 // 4
+P16_CRASH_LIMIT = 600           # a LANDER free fall is ~70 ticks; the burst ~16
+P16_LAND_LIMIT = 400            # a LANDER brake descent is ~200
+
+
+def p16_levels(g):
+    """TWENTY-FOUR LEVELS, AND THE RULE THAT WALKS THEM.
+
+    Two halves, and they fail for different reasons.
+
+    THE TABLE HALF is a data read: every row of both chains, against the
+    profile symbol the generator names for it, the spawn inside it and the pads
+    under it.  That is what would catch a generator that emitted the right
+    twelve profiles in the wrong order -- a chain that played L7, L2, L11 --
+    which no flight can see, because a flight only ever shows you the level it
+    is on.  It also asserts the profiles within a chain are PAIRWISE DISTINCT,
+    which is what gives "the world really changed" below its teeth.
+
+    THE RULE HALF flies it.  A landing advances, a crash retries, the last level
+    ends the chain on its own page, and the title remembers where you were --
+    four claims about main.c's tick loop that a table read cannot reach, and
+    three of them about a BRANCH that only one of the two endings takes.
+
+    WHAT IS NOT HERE IS THE DESCENT CHAIN IN FLIGHT, and that is a deliberate
+    trade rather than an omission: it shares the code path exactly -- `level`
+    is indexed by `pick` and the branches above never mention the mode -- and
+    flying it would add ~2400 frames to prove the same branch a second time.
+    The table half covers all 24; p13 flies DESCENT and would fail if the
+    pointer or the level index had stopped following the mode.
+    """
+    print("P16 levels")
+    # A missing symbol is an ASSERTION failure and not a harness error -- the
+    # power gate, on a ROM from before the level system, and it answers 1.
+    if not g.need("levels_lander", "levels_descent", "level", "lap",
+                  "level_count", "levels", "terrain", "world_h", "ship",
+                  "pads_lander_l1", "pads_descent_l1"):
+        return
+
+    # THE TABLE READ HAS TO WAIT FOR THE CARTRIDGE, and not because of the
+    # WRAM-copied pointers the way p2's does: `levels_lander` is a ROM address
+    # in bank 0, and the boot ROM has nothing mapped there -- read before crt0
+    # runs and every row comes back 0xFF, which is a table that "points" at
+    # 0xFFFF and reads as a generator bug.  boot() is the same gate the other
+    # checks that sample the ROM's own data open with.
+    g.boot()
+
+    # ---- the stride, first, because everything below reads through it -----
+    # LEVEL_ROW is mirrored in this file and a Level that grew a field would
+    # move every byte the checks below read.  The two chain tables are emitted
+    # back to back, so twelve rows apart IS the stride -- and reading a table at
+    # the wrong one would hand back plausible small numbers rather than an
+    # error, which is the trap active_profile() names for `terrain`.
+    stride = (g.addr["levels_descent"] - g.addr["levels_lander"]) \
+        // LEVELS_PER_CHAIN
+    check(stride == LEVEL_ROW,
+          "the Level row is the %d bytes these checks read it as -- the two "
+          "chain tables stand %d bytes apart over %d rows (got %d)"
+          % (LEVEL_ROW, g.addr["levels_descent"] - g.addr["levels_lander"],
+             LEVELS_PER_CHAIN, stride))
+
+    # ---- the table -------------------------------------------------------
+    bad_sym, bad_size, bad_spawn, bad_pad, dups = [], [], [], [], []
+    for chain, on_screen in (("lander", True), ("descent", False)):
+        seen = {}
+        for i in range(LEVELS_PER_CHAIN):
+            n = i + 1
+            row = g.level_row(chain, i)
+            # The generator names level 1's array after the chain and every
+            # later one `_l<n>`.  Mirrored here the way WORLD_COLS is: it is a
+            # naming CONVENTION, and the check is that the table points at the
+            # array the convention says it should.
+            sym = "terrain_%s%s" % (chain, "" if n == 1 else "_l%d" % n)
+            if g.addr.get(sym) != row["profile"]:
+                bad_sym.append((chain, n, sym, row["profile"]))
+            prof = g.profile_at(row["profile"])
+            seen[tuple(prof)] = seen.get(tuple(prof), []) + [n]
+            # The size rule, which is the one property that separates the two
+            # chains: a LANDER profile fits on the screen, a DESCENT one is
+            # taller than a single BG map can hold -- the same pair of bounds
+            # mklevel.py asserts (`VIEW_TILES_H` and `MAP_TILES`, both 18 and 32
+            # here).  A chain that lost an entry to the other's shape would
+            # still be twelve levels and still play, and this is the only thing
+            # in the file that would notice.
+            if (max(prof) < VIEW_H) != on_screen:
+                bad_size.append((chain, n, max(prof), on_screen))
+            elif not on_screen and max(prof) <= MAP_W:
+                bad_size.append((chain, n, max(prof), on_screen))
+            # The spawn is over a pad and above it -- the two things that make
+            # a level winnable.  Read out of the ROW's own pads table, so a row
+            # pointing at its neighbour's pads is caught here.
+            spans = g.pads_at(row["pads"])
+            col = (row["spawn_x"] + SHIP_W // 2) >> 3
+            under = [m for (c0, c1, m) in spans
+                     if c0 != PAD_SENTINEL and c0 <= col <= c1]
+            if not under:
+                bad_spawn.append((chain, n, col, "no pad"))
+            elif prof[col] * 8 - (row["spawn_y"] + SHIP_H) < 0:
+                bad_spawn.append((chain, n, col,
+                                  "gap %d" % (prof[col] * 8 -
+                                              (row["spawn_y"] + SHIP_H))))
+            # ...and every pad is a flat run at the row the profile has there.
+            # This is the agreement sim.h's contact test stands on: it reads
+            # terrain[col] and pad_mult(col) at the SAME column, so a table and
+            # a profile that disagreed would put the ship to rest a row above or
+            # below the deck it is standing on.
+            for j, (c0, c1, m) in enumerate(spans):
+                if c0 == PAD_SENTINEL:
+                    continue
+                if not (0 <= c0 <= c1 < WORLD_COLS and m in (1, 2)):
+                    bad_pad.append((chain, n, j, c0, c1, m))
+                elif set(prof[c0:c1 + 1]) != {prof[c0]}:
+                    bad_pad.append((chain, n, j, tuple(prof[c0:c1 + 1])))
+        dups += [(chain, v) for v in seen.values() if len(v) > 1]
+
+    check(not bad_sym,
+          "every row of both chains points at the profile the generator names "
+          "for it -- chain:level:symbol:got %r" % bad_sym[:3])
+    check(not bad_size,
+          "and every LANDER level fits on the screen while every DESCENT level "
+          "is taller than one BG map -- chain:level:deepest-row:wanted-onscreen "
+          "%r" % bad_size[:3])
+    check(not bad_spawn,
+          "and every level's spawn is over its own pad and above it, so no row "
+          "of either chain is a life that cannot be won -- chain:level:centre-"
+          "column:why %r" % (bad_spawn[:3],))
+    check(not bad_pad,
+          "and every pad is a flat run at the row the profile has there -- the "
+          "agreement sim.h's contact test stands on -- chain:level:slot:what "
+          "%r" % (bad_pad[:3],))
+    check(not dups,
+          "and no two levels of a chain are the same world -- a chain that "
+          "repeated one could not be told from one that walked it twice %r"
+          % (dups,))
+
+    # ---- a crash retries the level you were on ---------------------------
+    # A life with nobody at the controls: straight down onto the pad the ship
+    # spawned over, far too fast.  Cheapest ending there is, and it is the one
+    # the retry rule is about.
+    g.play()
+    l1 = g.u16("terrain")
+    l1_pads = g.u16("pads")
+    h1 = g.u16("world_h")
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < P16_CRASH_LIMIT:
+        g.run(1)
+        ticks += 1
+    g.run(BOOM_TICKS + 4)               # the burst, then the page behind it
+    check(g.var("game") == ST_END and g.var("level") == 0,
+          "a free fall wrecks the ship on LANDER L1 and does NOT advance the "
+          "chain -- game %d, level %d after %d ticks"
+          % (g.var("game"), g.var("level"), ticks))
+    g.run(8, "S")
+    g.run(2)
+    check(g.var("level") == 0 and g.u16("terrain") == l1 and
+          g.u16("pads") == l1_pads and g.u16("world_h") == h1,
+          "and START off the crashed page is the SAME level again -- the "
+          "profile, the pad table and the world height are all the ones it was "
+          "already on (level %d, terrain %s, pads %s, world_h %d)"
+          % (g.var("level"), hex(g.u16("terrain")), hex(g.u16("pads")),
+             g.u16("world_h")))
+
+    # ---- a landing advances ----------------------------------------------
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < P16_LAND_LIMIT:
+        g.run(1, "A" if g.ship()["vy"] > P16_BRAKE else "")
+        ticks += 1
+    g.run(2)
+    check(g.ship()["state"] == ST_LANDED and g.var("game") == ST_END and
+          bool(g.find_text("LANDED", MAP0)),
+          "a braked descent lands on the pad it spawned over (state %d, game "
+          "%d, verdict %d after %d ticks)"
+          % (g.ship()["state"], g.var("game"), g.ship()["verdict"], ticks))
+    check(bool(g.find_text("START NEXT LEVEL", MAP0)),
+          "and the page says what START is about to do -- a landing advances "
+          "now, and a prompt still reading NEW LIFE would be promising the old "
+          "rule %r" % (g.find_text("START NEXT LEVEL", MAP0),))
+
+    l2 = g.level_row("lander", 1)
+    l2_prof = g.profile_at(l2["profile"])
+    g.run(8, "S")
+    g.run(2)
+    check(g.var("level") == 1 and g.var("game") == ST_PLAY,
+          "START off the landed page advances to LANDER L2 (level %d, game %d)"
+          % (g.var("level"), g.var("game")))
+    check(g.active_profile() == l2_prof and g.u16("terrain") == l2["profile"] and
+          g.u16("pads") == l2["pads"],
+          "and THE WORLD REALLY CHANGED with it -- `terrain` and `pads` are "
+          "pointing at L2's own arrays out of the chain table, not at the level "
+          "it was just flying (terrain %s, want %s)"
+          % (hex(g.u16("terrain")), hex(l2["profile"])))
+    check(g.active_profile() != g.profile_at(l1),
+          "and L2 is a different world from L1 -- a chain whose entries all "
+          "named one profile would pass every line above")
+
+    # ---- the title remembers ---------------------------------------------
+    # SELECT off a live field, which is the press that used to cost your place.
+    # The level number is READ OFF THE SCREEN -- the digits on the mode line --
+    # rather than out of `level`, because the claim is that a player can see
+    # where they will resume from.
+    g.run(4, "T")
+    g.run(2)
+    check(g.var("game") == ST_TITLE and g.var("level") == 1 and
+          bool(g.find_text("MODE LANDER L2", MAP0)),
+          "SELECT back to the title does not cost your place -- the title "
+          "names LANDER L2 and level[] still says so (game %d, level %d, %r)"
+          % (g.var("game"), g.var("level"),
+             g.find_text("MODE LANDER L2", MAP0)))
+    g.run(8, "S")
+    g.run(2)
+    check(g.var("level") == 1 and g.active_profile() == l2_prof,
+          "and START from the title RESUMES it rather than starting over "
+          "(level %d, the same profile as before the SELECT %s)"
+          % (g.var("level"), g.active_profile() == l2_prof))
+
+    # ---- the chain ends, and the lap gets shorter -------------------------
+    # Land on every level from here to the end.  Eleven braked descents is the
+    # price of the only claim in this file that is about the LAST level: the
+    # completion branch is a different page and a different START, and nothing
+    # short of arriving there reaches it.
+    #
+    # THE LAST LANDING IS FLOWN AND ITS START IS NOT PRESSED -- the break is
+    # before the press and not in the loop's condition, because the level whose
+    # landing ends the chain is exactly the one the condition would have stopped
+    # short of flying.  Stopping there leaves the game still on the field at the
+    # last level, which is a page that never comes up and reads as a broken
+    # completion branch rather than as a loop that was one level shy.
+    while True:
+        ticks = 0
+        while g.ship()["state"] == ST_FLY and ticks < P16_LAND_LIMIT:
+            g.run(1, "A" if g.ship()["vy"] > P16_BRAKE else "")
+            ticks += 1
+        g.run(2)
+        if g.var("level") + 1 == LEVELS_PER_CHAIN or \
+                g.ship()["state"] != ST_LANDED:
+            break
+        g.run(8, "S")
+        g.run(2)
+    check(g.var("level") == LEVELS_PER_CHAIN - 1 and
+          bool(g.find_text("MISSION COMPLETE", MAP0)),
+          "landing on the LAST level of the chain ends it on a page of its own "
+          "rather than another landing (level %d of %d, game %d, page %r)"
+          % (g.var("level"), LEVELS_PER_CHAIN, g.var("game"),
+             g.find_text("MISSION COMPLETE", MAP0)))
+    lap1_fuel = FUEL_START - FUEL_LAP_STEP
+    check(bool(g.find_text("START NEW LAP", MAP0)),
+          "and it says so -- %r" % (g.find_text("START NEW LAP", MAP0),))
+    g.run(8, "S")
+    g.run(2)
+    check(g.var("level") == 0 and g.var("lap") == 1,
+          "START off it replays the chain from level 1 on a NEW LAP (level %d, "
+          "lap %d)" % (g.var("level"), g.var("lap")))
+    check(g.active_profile() == g.profile_at(l1) and g.u16("terrain") == l1,
+          "and the world is L1 again -- the same twelve designs, not a "
+          "seventeenth level (terrain %s, L1 %s)"
+          % (hex(g.u16("terrain")), hex(l1)))
+    check(g.ship()["fuel"] == lap1_fuel,
+          "and THE TANK IS SMALLER, which is the whole of the ramp -- the "
+          "layouts never get harder, so this is the number that does (%d units "
+          "against lap 1's %d)" % (g.ship()["fuel"], FUEL_START))
+
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
           ("p7_sound", p7_sound), ("p9_window", p9_window),
           ("p10_camera", p10_camera), ("p11_stream", p11_stream),
           ("p12_mode", p12_mode), ("p13_descent", p13_descent),
-          ("p14_sgb_border", p14_sgb_border), ("p15_ending", p15_ending)]
+          ("p14_sgb_border", p14_sgb_border), ("p15_ending", p15_ending),
+          ("p16_levels", p16_levels)]
 
 
 def main(rom, mapfile, only=None):

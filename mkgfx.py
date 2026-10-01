@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Procedural tiles and sprites for LUNA LANDEER -> gfx.h
+"""Procedural tiles and sprites for LUNA LANDER -> gfx.h
 
 The tile ids emitted here are a three-way contract (mkgfx.py, gfx.h,
 tools/probe.py).  All of them stay < 128 because LCDC.4 = 0 puts BG tile data in

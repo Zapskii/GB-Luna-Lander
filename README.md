@@ -1,4 +1,4 @@
-# LUNA LANDEER
+# LUNA LANDER
 
 A lunar lander for the Game Boy (DMG), written in GBDK-2020 C with no game
 engine. Same lineage as GB-Protector and GB-Draughts: procedural art from a
@@ -7,15 +7,22 @@ the host before anything touches GBDK.
 
 **Just want to play it? [PLAY.md](PLAY.md) is the player's guide** — the
 controls, the landing rule, what the numbers on the screen mean, and the pads.
-The ROM is a [release asset](https://github.com/Zapskii/GB-Luna-Landeer/releases):
+[luna-lander-field-guide.html](luna-lander-field-guide.html) is the same guide
+as a single self-contained page, plus a drawn chart of the safe landing envelope
+and a review of the game; open it in a browser.
+The ROM is a [release asset](https://github.com/Zapskii/GB-Luna-Lander/releases):
 download it and load it in an emulator, or flash it to a cartridge. Everything
 below this line is the build and the internals.
 
-**Current stage: Milestone 2 complete.** Two modes play end to end — LANDER's
-fixed 160 px world and DESCENT's 808 px one — over one ship that leans,
-thrusts, burns fuel, wraps at the world's edges, and comes to rest on a pad or
-crashes: a landing verdict with a named reason and a score, a full-screen page
-for each ending, live telemetry over the ground in a status bar that the
+**Current stage: Milestone 3 complete.** Two modes play end to end — LANDER's
+fixed 160 px worlds and DESCENT's 808 px ones — **twelve fixed levels a mode**,
+each a hand-designed layout expanded from a recipe at build time, walked by
+landing and retried by crashing. Clear the twelfth and the chain replays from
+level 1 on a lap with a smaller tank; the ramp lives in the fuel, never in the
+layouts or the physics. Over that: one ship that leans, thrusts, burns fuel,
+wraps at the world's edges, and comes to rest on a pad or crashes — a landing
+verdict with a named reason and a score, a full-screen page for each ending, a
+completion page, live telemetry over the ground in a status bar that the
 scrolling does not touch, a burst where the ship died, three sounds, and a Super
 Game Boy border.
 `make` builds the ROM, `make test` runs the physics' unit tests on the host, and
@@ -23,14 +30,47 @@ Game Boy border.
 
 ## Modes
 
-| Mode | The world | Status |
-|---|---|---|
-| **LANDER** | One 160 px screen, wrapping left to right. The whole world fits on the screen, so the camera is pinned at 0 and the view is fixed. | Plays. What the ROM boots into. |
-| **DESCENT** | 808 px of world in the same 160 px of width, with a camera following the ship down it and the map streamed a row at a time around it. | Plays. SELECT it on the title and START opens it. |
+| Mode | The world | Levels | Status |
+|---|---|---|---|
+| **LANDER** | One 160 px screen, wrapping left to right. The whole world fits on the screen, so the camera is pinned at 0 and the view is fixed. | 12, each under 18 tiles deep so its pad is never under the status bar | Plays. What the ROM boots into. |
+| **DESCENT** | 808 px of world in the same 160 px of width, with a camera following the ship down it and the map streamed a row at a time around it. | 12, each deeper than a single BG map can hold | Plays. SELECT it on the title and START opens it. |
 
 Both are the same game over two profiles, and P12's boot default is a single
 `pick` byte: the title's mode line, the profile the renderer and the collision
 read, and the world the camera clamps against are one answer from the first tick.
+
+**Each mode is its own chain of twelve levels.** A landing advances you one
+level; a crash puts you back on the one you were on; SELECT to the title does
+not cost your place, and the title names the level it will resume. Nothing about
+the ship changes between levels — gravity, thrust and the landing thresholds are
+the same constants on all twenty-four — so what a level is, is a layout.
+
+## The levels
+
+A level is **a recipe, expanded at build time**: a shape, an amplitude, a base
+depth, a pad span or two and a spawn column, which `tools/mklevel.py` turns into
+a 20-byte height profile. The ROM carries only the expanded bytes — there is no
+recipe in the cart and no runtime expansion, because `ship_step()` reads
+`terrain[col]` every tick. Five triangle-wave shapes, each **zero at both seam
+columns by construction**, so no choice of depth or amplitude can make the
+world's wrap visible.
+
+The generator **rejects a bad recipe rather than drawing it**: a spawn not over
+a pad, a spawn level with its own pad, a pad shoulder steeper than 4 tiles, a
+profile that breaks its chain's size rule — all of those are `make level`
+failures. That is what makes the set hand-tunable, and it is why there is no
+PRNG anywhere near the layouts: a seed gives determinism but nothing to
+reject against, and a level that cannot be validated is a level that ships
+unwinnable.
+
+Level 1 of each chain is **byte-identical to the single world the game used to
+have**, which is what kept the host tests and the existing probe checks honest
+through the change.
+
+Twelve a chain is an authoring budget rather than a space one: the tables cost
+about 32 bytes a level, and the ROM has room for hundreds. The constraints are
+that every level has to be hand-tuned against those assertions, and that the
+probe has to be able to fly one.
 
 The sky is one line in both modes. `row_blit()` writes the stars out of
 `terrain.h`'s `star_cells[]`, indexed by **world** row — so LANDER's pinned
@@ -56,8 +96,8 @@ refactor of the physics, the tests and the checks. `terrain.h` and
 | d-pad LEFT | lean and push the ship left. **Hold** to keep pushing |
 | d-pad RIGHT | lean and push the ship right. **Hold** to keep pushing |
 | A or B | thrust along the nose. **Hold** one to keep burning — this is the held control, not the edge |
-| START | restart the life — mid-flight, after a landing, after a crash |
-| SELECT | back to the title — in flight, after a landing, after a crash; on the title itself, switch between **LANDER** and **DESCENT** |
+| START | restart the life mid-flight, **advance to the next level** after a landing, retry the same level after a crash, and start a new lap off the completion page |
+| SELECT | back to the title — in flight, after a landing, after a crash; on the title itself, switch between **LANDER** and **DESCENT**. Your place is kept either way |
 
 LEFT and RIGHT are held levels, like the engine: a direction down leans the nose
 into a fixed angle and adds a sideways acceleration every tick, and letting go
@@ -110,6 +150,7 @@ carries none of it while it is up:
 |---|---|---|
 | **LANDED** | the pad's multiplier, and the fuel left in the tank | the tick the ship comes to rest |
 | **CRASHED** | the verdict `classify_landing()` returned, named — TOO FAST, DRIFTING, TILTED, NO PAD | the tick after the crash burst finishes |
+| **MISSION COMPLETE** | the lap just finished, and the tank the next one starts on | in place of LANDED, on the last level of a chain |
 
 The asymmetry is the burst's and not a preference. A landing is a ship at rest
 with nothing left to watch, so its page is immediate; an explosion *is* the
@@ -121,16 +162,27 @@ about why a life ended.
 The status bar is cleared with the world. It is the WINDOW layer and covers the
 screen's bottom two rows whatever the background holds, and its readings are
 about a flight that has finished: ALT is 0 on both pages, the tank is whatever
-was left, and the verdict row would be repeating the page's own heading. START
-opens a new life from either page, on the field and on the mode already selected;
-SELECT goes back to the title.
+was left, and the verdict row would be repeating the page's own heading.
+
+**START is where the progression rule lives, and it reads `ship.state` rather
+than which page was drawn** — so the rule and the page cannot disagree about
+what just happened. Off LANDED it advances to the next level; off CRASHED it
+retries the same one and does **not** rebuild the field, because a retry is the
+same world and `terrain` and `world_h` still describe it; off MISSION COMPLETE
+it starts a new lap with a tank shorter by `FUEL_LAP_STEP`, floored at
+`FUEL_FLOOR`, over the same twelve designs. Only the advance rebuilds the field,
+because it is the only one that changes the world. SELECT goes back to the
+title from any of them, and the title keeps your place.
 
 The crash page is also the reason `build_hud()`'s second row has no LANDED case
 any more — that row would be written and covered on the same tick — and why
 probe.p13 stops sampling the camera on the tick a descent ends: that tick's
 screen is no longer one the camera draws.
 
-Pad multipliers come out of `terrain.h`, not out of the renderer:
+**Pad multipliers and pad columns are level data**, out of `terrain.h` and not
+out of the renderer: every level declares one or two spans and the row each is
+carved flat to, and `mklevel.py` rejects a level whose pads overlap or whose
+shoulder is a cliff. L1 of each chain is the world the game used to have:
 
 | Pad | Columns | Score |
 |---|---|---|
@@ -139,13 +191,14 @@ Pad multipliers come out of `terrain.h`, not out of the renderer:
 
 **A pad is drawn as a pad.** `row_blit()` picks the surface tile with
 `pad_mult(col)` — `T_PAD_TOP` on a pad column, `T_TERRAIN_TOP` everywhere else —
-so the two places a life can end well are the only lit things on the ground
-rather than two stretches that merely happen to be flat. The question is asked
-only on the surface row, which is what keeps it off the per-cell path `p13`'s
-frame budget is measured on.
+so the places a life can end well are the only lit things on the ground rather
+than stretches that merely happen to be flat. The question is asked only on the
+surface row, which is what keeps it off the per-cell path `p13`'s frame budget
+is measured on.
 
-The ship spawns directly above the ×2 pad, at rest, so a drop with nobody at the
-controls is a crash and the whole of the skill is arriving slowly.
+Every level spawns the ship at rest, directly above its **smaller, ×2 pad** —
+that is one of the generator's assertions, not a convention — so a drop with
+nobody at the controls is a crash and the whole of the skill is arriving slowly.
 
 ## The Super Game Boy border
 
@@ -220,7 +273,7 @@ to *play* the game, and `make` on its own builds the ROM with no Python at all.
 |---|---|
 | `main.c` | Everything that touches hardware: boot, the tick loop, input, rendering, the HUD and the sound |
 | `sim.h` | THE RULES — pure C, `<stdint.h>` only, never `gb/gb.h`. Sub-pixel stepping, gravity, thrust, fuel, the wrap and the landing verdict |
-| `tools/mklevel.py` | Generates `terrain.h`: the height profile, the pad table and the star field, with self-checks |
+| `tools/mklevel.py` | Generates `terrain.h`: the level recipes, the profiles and pad tables they expand to, the two chain tables and the star field, with self-checks |
 | `terrain.h` | Generated, committed — a plain `make` needs no Python |
 | `tools/mktab.py` | Generates `tables.h`: the 16 thrust unit vectors |
 | `tables.h` | Generated, committed |
@@ -233,6 +286,8 @@ to *play* the game, and `make` on its own builds the ROM with no Python at all.
 | `tests/test_sim.c` | Host tests for the physics and the landing rule |
 | `tools/probe.py` | Headless emulator checks: the wiring between `sim.h` and `main.c` |
 | `tools/shot.py` | Screenshot helper |
+| `PLAY.md` | The player's guide |
+| `luna-lander-field-guide.html` | The player's guide as one self-contained page, with the landing-envelope chart and the review. Hand-written, not generated |
 | `Dockerfile` | The GBDK toolchain image `make image` builds |
 
 ## Testing strategy
@@ -272,20 +327,25 @@ through the probe's own font ids — the heading, and the reason the ROM's own
 `ship.verdict` says the crash was — and asserts the timing a screenshot cannot
 show, that a crash's burst plays every frame of itself before the page covers it
 and that a landing's page is immediate. Two crashes with different verdicts are
-driven on purpose, so a page that always said the same word fails.
+driven on purpose, so a page that always said the same word fails. P16 has two
+halves and they fail for different reasons: a **data read** of all twenty-four
+level rows against the profile symbol the generator named for each, the spawn
+inside it and the pads under it — which is what would catch two good profiles
+emitted in the wrong order, something no flight can see — and a **flight** of
+the LANDER chain that lands, crashes, advances, resumes from the title and
+arrives at the completion page into a lap whose tank is measurably shorter.
 
 `make probe` exits 0 when every check passes, 1 when a check fails, and 2 when
 the harness itself broke — so a stuck ROM is never mistaken for a passing one.
 
 ## Not implemented yet (by design)
 
-- **Levels, and any score that outlives a life.** One landing scores its pad's
-  multiplier on the ending page and START is the only thing that follows it.
-  A descent spends about a quarter of its tank, so the mode is a flight to be
-  flown rather than a budget to be rationed.
-- **A saved high score.** It needs a battery-backed cart, which is a
-  hardware/BOM decision rather than just a code change.
-- **Difficulty or a wind model.** Gravity and thrust are two constants; the
+- **A score that outlives a life, or a saved high score.** A landing scores its
+  pad's multiplier on its page and that is the end of it. Keeping one across
+  sessions needs a battery-backed cart, which is a hardware/BOM decision rather
+  than just a code change.
+- **Difficulty or a wind model.** Gravity and thrust are two constants, and no
+  level tunes them — the only thing that ramps is the tank, once per lap. The
   weather is not a feature yet.
 - **Music.** The three event sounds are hand-written register writes; there is
   no sound driver.
@@ -294,7 +354,7 @@ the harness itself broke — so a stuck ROM is never mistaken for a passing one.
 
 The ROM is never committed: `*.gb`, the linker map and the object files are all
 gitignored, and the built `luna.gb` is attached to a
-[GitHub release](https://github.com/Zapskii/GB-Luna-Landeer/releases) instead.
+[GitHub release](https://github.com/Zapskii/GB-Luna-Lander/releases) instead.
 To reproduce a release binary, run `make probe` and then `make clean` and `make`
 (the probe leaves a `-debug` ROM in `luna.gb`, and it is newer than the sources),
 and record the md5 before you upload it.

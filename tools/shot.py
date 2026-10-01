@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless screenshot + scripted input for LUNA LANDEER.
+"""Headless screenshot + scripted input for LUNA LANDER.
 
 WHY THIS EXISTS: mGBA is the emulator you play the game in, but it cannot be
 driven from a script on this machine -- it has no screenshot flag, and macOS

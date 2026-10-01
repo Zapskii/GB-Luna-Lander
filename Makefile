@@ -1,4 +1,4 @@
-# GB-LUNA-LANDEER build.
+# GB-LUNA-LANDER build.
 #   make          build luna.gb   (GBDK if GBDK_HOME is set, else Docker)
 #   make test     host unit tests (plain gcc, no emulator)
 #   make probe    headless PyBoy check harness against the rules in main.c

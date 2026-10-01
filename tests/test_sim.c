@@ -1,4 +1,4 @@
-/* Host tests for LUNA LANDEER.
+/* Host tests for LUNA LANDER.
  *
  * WHY THIS EXISTS: the physics lives in sim.h as pure C with no gb/gb.h in it,
  * so plain gcc can compile and run it -- no emulator, no ROM, no waiting.

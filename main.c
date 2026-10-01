@@ -1,4 +1,4 @@
-/* LUNA LANDEER -- main.c
+/* LUNA LANDER -- main.c
  *
  * Hardware only: boot, the tick loop, and the drawing that has to go through
  * gb/gb.h.  Every rule (gravity, thrust, the landing verdict) belongs in sim.h
@@ -303,6 +303,23 @@ static uint8_t game;
  * request), and the linker sees one symbol, not one per translation unit. */
 static uint8_t pick;
 
+/* WHICH LEVEL of that mode, and which time round its chain.
+ *
+ * ONE INDEX PER CHAIN, indexed by `pick`, and not one shared byte: the two
+ * modes are two sequences of twelve, so a player who is on LANDER 7 and
+ * SELECTs over to DESCENT has not abandoned LANDER 7 -- coming back resumes it.
+ * A byte array index is also no multiply, which a [mode * count + level] layout
+ * would have needed on a path that runs every tick.
+ *
+ * `levels` and `level_count` are the ACTIVE CHAIN, bound in field_open() with
+ * `terrain` and `pads`, so main.c's three questions about the world -- which
+ * profile, which pads, how many levels -- are one answer from one place.
+ */
+static const Level *levels;
+static uint8_t level_count;
+static uint8_t level[2];
+static uint8_t lap[2];
+
 /* The visible screen, 20x18 tile ids.  ONE buffer for both screens,
  * deliberately: the title is a 20x18 field of tiles and so is the play field,
  * and the only thing a second buffer buys is a way for the two to be filled in
@@ -391,9 +408,13 @@ static uint8_t ring_stale;
  * writes a fresh one, so the spawn exists in exactly one place. */
 static Ship ship;
 
-/* Where a life starts: high above the x2 pad, at rest, nose up, full tank.
+/* Where a life starts is NO LONGER HERE.  It is a field of the level it opens
+ * on -- levels[level[pick]].spawn_x/spawn_y -- because it is part of the
+ * design: a spawn that is not over a pad, or opening on the surface, would be a
+ * level that cannot be won, and tools/mklevel.py rejects a level where it is.
+ * The C-side values are level 1 of each chain, 108 and 16, unchanged.
  *
- * DIRECTLY over a pad, and over the x2 one, both on purpose.  P5's deliverable
+ * DIRECTLY over a pad, and over the x2 one, on all 24 levels.  P5's deliverable
  * is "a hard drop crashes, a soft landing on a pad succeeds" -- that is a
  * DESCENT, not a flight -- so the ship starts where the landing is rather than
  * somewhere it would first have to be flown to, and the whole of the skill is
@@ -408,19 +429,40 @@ static Ship ship;
  * times SAFE_VY_MAX, so a drop with no hand on the stick is a crash rather
  * than a coin toss.  It is also below the HUD strip's two rows (16 px), so the
  * telemetry does not sit on top of the ship it is reporting on. */
-#define SPAWN_X 108
-#define SPAWN_Y 16
+
+/* The tank a lap is flown on.  A CHAIN THAT HAS BEEN CLEARED REPLAYS ON A
+ * SMALLER ONE -- the only difficulty ramp in the game, and deliberately so:
+ * the layouts never change, so the level you learned is the level you fly, and
+ * the thing that gets harder is how much of it you can afford to burn.
+ *
+ * ONE place this is computed.  ship_init() spends it and build_complete()
+ * prints it, and a second copy would let the page promise a tank the life did
+ * not open on -- which is the one number on that page the player will check.
+ *
+ * ponytail: both are feel numbers, tuned by playing a lap and not by argument.
+ * The floor is not free: mklevel.py's drop bound is set against the deepest
+ * level being flyable on MAX_DROP_PX, and a floor this low would have to be
+ * re-derived there if a level ever went deeper. */
+#define FUEL_LAP_STEP 60
+#define FUEL_FLOOR    300
+
+static uint16_t lap_fuel(uint8_t l)
+{
+    int16_t f = (int16_t)(FUEL_START - FUEL_LAP_STEP * l);
+
+    return (uint16_t)(f < FUEL_FLOOR ? FUEL_FLOOR : f);
+}
 
 static void ship_init(void)
 {
-    ship.x = SPAWN_X;
-    ship.y = SPAWN_Y;
+    ship.x = levels[level[pick]].spawn_x;
+    ship.y = levels[level[pick]].spawn_y;
     ship.xf = 0;
     ship.yf = 0;
     ship.vx = 0;
     ship.vy = 0;
     ship.heading = 0;
-    ship.fuel = FUEL_START;
+    ship.fuel = lap_fuel(lap[pick]);
     ship.state = ST_FLY;
     /* Nothing has touched down yet, and SAFE is 0 rather than a claim: the
      * state byte is what says whether this means anything. */
@@ -993,7 +1035,18 @@ static void ring_stream(void)
  * probe.p12_mode boots raw. */
 static void field_open(void)
 {
-    terrain = (pick == MODE_DESCENT) ? terrain_descent : terrain_lander;
+    levels = (pick == MODE_DESCENT) ? levels_descent : levels_lander;
+    level_count = (pick == MODE_DESCENT) ? DESCENT_LEVELS : LANDER_LEVELS;
+    /* A belt on top of the table: level[pick] is only ever walked by the two
+     * branches in the tick loop, and both keep it inside the chain -- but it is
+     * an ARRAY INDEX into a table the level generator committed, so a value
+     * that ever escaped would read a profile out of whatever const data follows
+     * the table and draw it as terrain. This is the one place it is cheap to
+     * say so. */
+    if (level[pick] >= level_count)
+        level[pick] = 0;
+    terrain = levels[level[pick]].profile;
+    pads = levels[level[pick]].pads;
 }
 
 /* How tall the ACTIVE world is, in px: the bottom of the deepest column, one
@@ -1053,9 +1106,18 @@ static void build_field(void)
  * the four literals it replaces. */
 static void build_title(void)
 {
+    uint8_t n = (uint8_t)(level[pick] + 1);
+
     bg_clear();
-    text(bg, 4, 4, "LUNA LANDEER");
-    text(bg, 4, MODE_ROW, pick == MODE_LANDER ? "MODE LANDER" : "MODE DESCENT");
+    text(bg, 4, 4, "LUNA LANDER");
+    /* The mode AND THE LEVEL, because SELECT on this screen does not cost you
+     * your place -- the title is the one screen that says where you will resume
+     * from, and "MODE LANDER" alone would leave the player to find out by
+     * pressing START.  Digits rather than a word so the row still fits beside
+     * the mode name, and 1 or 2 wide so level 3 reads "L3" and not "L03". */
+    text(bg, 4, MODE_ROW, pick == MODE_LANDER ? "MODE LANDER L" : "MODE DESCENT L");
+    dec(&bg[MODE_ROW * VIEW_W + (pick ? 18 : 17)], (uint8_t)(n > 9 ? 2 : 1),
+        (int16_t)n);
     text(bg, 4, 10, "SELECT MODE");
     text(bg, 4, 12, "PRESS START");
 }
@@ -1098,7 +1160,12 @@ static void build_landed(void)
      * wider because nothing here has to share its row with two velocities. */
     text(bg, 3, 10, "FUEL LEFT ");
     dec(&bg[10 * VIEW_W + 13], 3, (int16_t)ship.fuel);
-    text(bg, 3, 13, "START NEW LIFE");
+    /* A LANDING ADVANCES, so this prompt is a promise the tick loop below has
+     * to keep: START on this page walks to the next level of the chain, and
+     * the tank it opens on is whatever `lap` says it is.  The LAST level of a
+     * chain never reaches this page -- build_complete() is what it draws -- so
+     * there is no "no next level" case to spell out here. */
+    text(bg, 2, 13, "START NEXT LEVEL");
     text(bg, 4, 15, "SELECT TITLE");
 }
 
@@ -1119,6 +1186,40 @@ static void build_crashed(void)
     default:            text(bg, 7, 7, "NO PAD");   break;
     }
     text(bg, 3, 13, "START NEW LIFE");
+    text(bg, 4, 15, "SELECT TITLE");
+}
+
+/* The third page, and the only one that is not a reading of a life: A CHAIN
+ * THAT HAS BEEN CLEARED.  It replaces the LANDED page on the last level rather
+ * than following it, because the last landing is where the chain ends and two
+ * pages in a row would be the game saying the same thing twice.
+ *
+ * IT SAYS THE TWO THINGS THAT CHANGE.  The NEXT LAP number, because SELECT
+ * here does not lose it and the title above does not carry it; and the TANK
+ * that lap opens on, which is the whole of the ramp -- the layouts never get
+ * harder, so the player deserves to see the number that does.  Read through
+ * lap_fuel(), which is the same call ship_init() spends, so the promise and the
+ * life are one answer.
+ *
+ * START replays from level 1 on the smaller tank.  Not a new mode and not a
+ * bigger world: the same twelve designs again, with less to spend on them,
+ * which is exactly the difficulty the owner asked for and the reason no level
+ * needed tuning. */
+static void build_complete(void)
+{
+    uint8_t next = (uint8_t)(lap[pick] + 1);
+
+    bg_clear();
+    /* 16 tiles in a 20-wide field, so column 2 rather than 4 -- the longer
+     * heading of the three pages and the only one that needs the extra width. */
+    text(bg, 2, 4, "MISSION COMPLETE");
+    text(bg, 5, 7, "LAP ");
+    dec(&bg[7 * VIEW_W + 9], 1, (int16_t)next);
+    text(bg, 5, 10, "TANK ");
+    dec(&bg[10 * VIEW_W + 10], 3, (int16_t)lap_fuel(next));
+    /* The lap number is on row 7 and repeating it here would be the fourth
+     * thing on a page that only has two to say. */
+    text(bg, 3, 13, "START NEW LAP");
     text(bg, 4, 15, "SELECT TITLE");
 }
 
@@ -1394,25 +1495,42 @@ void main(void)
             }
         }
 
-        /* The ending page, which is a dead end until the player leaves it.
-         * START takes it back to the field on the SAME tick -- the play branch
-         * below is what spawns the ship, exactly as it does when the title
-         * hands over, so ship_init() still exists in one place and the new life
-         * opens on the press rather than a tick after it.
+        /* START off the page, and WHICH PAGE IT WAS is the whole of the
+         * progression rule.  A LANDING advances; A CRASH RETRIES.  That is
+         * read off ship.state -- still the verdict, because the play branch
+         * below has not yet run ship_init() -- and not off which page was
+         * built, so the rule and the page cannot disagree about it.
          *
-         * NO build_field() HERE, unlike the title's START, and the difference
-         * is where the world comes from.  The title is where the mode is
-         * chosen, so it has to open one; a page was reached from a field that
-         * was already open on the mode the player picked, and `terrain` and
-         * world_h still describe it.  The ring is not this branch's problem
-         * either: ship_init() raises ring_stale, and the play branch below
-         * rebuilds the band from the camera on this same tick.
+         * THE ADVANCE IS THE ONLY THING THAT REBUILDS THE FIELD, and the reason
+         * is that it is the only thing that changes the WORLD.  A retry and a
+         * mid-flight restart are the same world again, so `terrain` and world_h
+         * still describe it and the comment below about no build_field() is
+         * still exactly right.  A landing walked to a new level, which is a new
+         * profile, new pads, a new world height and a new spawn -- and
+         * build_field() is what binds all four, ordered before the play branch
+         * below because that branch clamps the camera against world_h on this
+         * same tick.
          *
-         * SELECT is not here.  Leaving for the title is the hand-over ABOVE,
-         * which already takes its own bit out of `pressed` -- one press, one
-         * screen. */
-        if (game == ST_END && (pressed & J_START))
+         * The last level of a chain does not advance: it clears the lap, which
+         * is a counter and a smaller tank and the SAME twelve designs again.
+         *
+         * START is not consumed here.  The play branch below reads the same
+         * `pressed` and calls ship_init(), which is what makes the new life open
+         * on the press rather than a tick after it -- so the spawn is written in
+         * one place and it is now read out of the level field_open() has just
+         * bound. */
+        if (game == ST_END && (pressed & J_START)) {
+            if (ship.state == ST_LANDED) {
+                if (level[pick] + 1 < level_count) {
+                    level[pick]++;
+                } else {
+                    lap[pick]++;
+                    level[pick] = 0;
+                }
+                build_field();
+            }
             game = ST_PLAY;
+        }
 
         if (game == ST_PLAY) {
             /* Decode the pad into sim.h's flags.  A and B are the main engine,
@@ -1571,10 +1689,20 @@ void main(void)
                 game = ST_END;
                 SCY_REG = 0;
                 field_hide();
-                if (ship.state == ST_LANDED)
-                    build_landed();
-                else
+                if (ship.state == ST_LANDED) {
+                    /* A landing on the LAST level is the chain being cleared,
+                     * and it gets the completion page instead of the landing
+                     * page -- the same tick, the same one map write.  `lap` is
+                     * not touched here: START is what clears it, so a page left
+                     * on the screen says what is about to happen and not what
+                     * has. */
+                    if (level[pick] + 1 < level_count)
+                        build_landed();
+                    else
+                        build_complete();
+                } else {
                     build_crashed();
+                }
                 set_bkg_tiles(0, 0, VIEW_W, VIEW_H, bg);
                 set_win_tiles(0, 0, VIEW_W, 2, bg);
             }

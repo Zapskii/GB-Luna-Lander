@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thrust directions for LUNA LANDEER -> tables.h
+"""Thrust directions for LUNA LANDER -> tables.h
 
 WHY A TABLE AND NOT A SINE.  The ship has exactly ROT_STEPS headings, so its
 thrust vector is one of ROT_STEPS constants -- there is no angle to compute at

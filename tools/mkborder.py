@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate art/border_sgb.png -- the Super Game Boy border for GB-LUNA-LANDEER.
+"""Generate art/border_sgb.png -- the Super Game Boy border for GB-Luna-Lander.
 
 The border is a 256x224 image; the 160x144 game window (x 48..207, y 40..183)
 stays transparent, because that is where the SGB puts the Game Boy's screen.
@@ -51,7 +51,7 @@ GREY_L = (170, 166, 152, 255)           # ...its lit surface
 RIM = (98, 106, 130, 255)               # the porthole rim's metal
 BYLINE = (152, 202, 222, 255)           # the byline: a caption, not a title
 
-TITLE, TITLE_SCALE = "LUNA LANDEER", 2
+TITLE, TITLE_SCALE = "LUNA LANDER", 2
 CREDIT, CREDIT_SCALE = "BY ZAPSKI", 1
 MODES = "LANDER  DESCENT"               # the two worlds, along the bottom
 
@@ -70,7 +70,7 @@ def read_font():
     """The game's own 5x7 glyphs, straight out of mkgfx.py.
 
     FONT maps a character to seven 5-bit rows.  Parsing rather than copying
-    means the border spells LUNA LANDEER in exactly the letters the HUD does,
+    means the border spells LUNA LANDER in exactly the letters the HUD does,
     and follows if the font ever grows.
     """
     src = open(MKGFX).read()

@@ -1,4 +1,4 @@
-/* LUNA LANDEER -- sim.h
+/* LUNA LANDER -- sim.h
  *
  * THE RULES.  Pure C: no gb/gb.h in here, so tests/test_sim.c compiles this
  * with plain gcc -std=c99 and the physics can be run without an emulator.

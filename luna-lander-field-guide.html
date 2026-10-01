@@ -1,0 +1,548 @@
+<title>Luna Lander Field Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* ============================================================
+   LUNA LANDER — field guide and review
+
+   PALETTE: the Super Game Boy border's own colours. Deep space
+   navy for the dark theme, gold for the title, rocket red for
+   anything fatal, regolith grey for the light theme's paper.
+
+   TYPE: Silkscreen (the 8-bit wordmark and labels), IBM Plex
+   Sans for reading, IBM Plex Mono for numbers and telemetry.
+
+   LAYOUT: one measured column at reading width; a full-bleed
+   instrument strip where the game's HUD is quoted, and a drawn
+   landing-envelope chart where the rule is.
+   ============================================================ */
+
+:root {
+  --bg:        #EFEDE6;
+  --surface:   #E5E2D9;
+  --surface-2: #F6F4EE;
+  --fg:        #12172B;
+  --muted:     #5B6178;
+  --accent:    #8A5E0C;
+  --accent-2:  #B98A1E;
+  --alert:     #A63A2B;
+  --rule:      #CFCBBF;
+  --hud-bg:    #0A0E22;
+  --hud-fg:    #E9EDF9;
+  --hud-dim:   #8E97B8;
+  --hud-gold:  #E5BE4D;
+
+  --display: "Silkscreen", "Courier New", monospace;
+  --body:    "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono:    "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --col: 66ch;
+  --gutter: 20px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #080B1C;
+    --surface:   #10152E;
+    --surface-2: #141A38;
+    --fg:        #E6E9F5;
+    --muted:     #98A1BE;
+    --accent:    #E5BE4D;
+    --accent-2:  #F2D98A;
+    --alert:     #E0705A;
+    --rule:      #232A4A;
+    --hud-bg:    #04060F;
+    --hud-fg:    #E9EDF9;
+    --hud-dim:   #7C86A6;
+    --hud-gold:  #E5BE4D;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg:        #080B1C;
+  --surface:   #10152E;
+  --surface-2: #141A38;
+  --fg:        #E6E9F5;
+  --muted:     #98A1BE;
+  --accent:    #E5BE4D;
+  --accent-2:  #F2D98A;
+  --alert:     #E0705A;
+  --rule:      #232A4A;
+  --hud-bg:    #04060F;
+  --hud-fg:    #E9EDF9;
+  --hud-dim:   #7C86A6;
+  --hud-gold:  #E5BE4D;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--body);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  padding-block: 0;
+  padding-inline: var(--gutter);
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: calc(var(--col) + 8ch); margin: 0 auto; }
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  padding-block: clamp(2.5rem, 8vw, 4.5rem) 2rem;
+  border-bottom: 1px solid var(--rule);
+}
+.wordmark {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(1.5rem, 6.6vw, 2.6rem);
+  line-height: 1.05;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+  margin: 0;
+  text-wrap: balance;
+}
+.tagline {
+  margin: 1rem 0 0;
+  font-size: 1.125rem;
+  color: var(--fg);
+  max-width: 46ch;
+}
+.specstrip {
+  margin: 1.75rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.specstrip span { white-space: nowrap; }
+
+/* ---------- sections ---------- */
+
+section { padding-block: clamp(2.25rem, 6vw, 3.5rem); border-bottom: 1px solid var(--rule); }
+section:last-of-type { border-bottom: 0; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.6rem;
+}
+h2 {
+  font-family: var(--display);
+  font-weight: 400;
+  font-size: clamp(1.05rem, 3.6vw, 1.35rem);
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  color: var(--fg);
+  margin: 0 0 1.25rem;
+  text-wrap: balance;
+}
+h3 {
+  font-family: var(--body);
+  font-weight: 600;
+  font-size: 1rem;
+  margin: 2rem 0 0.5rem;
+}
+p { margin: 0 0 1rem; max-width: var(--col); }
+p:last-child { margin-bottom: 0; }
+strong { font-weight: 600; }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+code {
+  font-family: var(--mono);
+  font-size: 0.875em;
+  background: var(--surface);
+  padding: 0.1em 0.35em;
+  border-radius: 2px;
+}
+
+/* ---------- tables ---------- */
+
+.tablewrap { overflow-x: auto; margin: 0 0 1rem; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 32rem;
+  font-size: 0.9375rem;
+}
+caption {
+  caption-side: bottom;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding-top: 0.75rem;
+}
+th, td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.6rem 1rem 0.6rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+th {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+td:first-child { white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+.verdict { font-family: var(--mono); font-weight: 600; letter-spacing: 0.04em; }
+.verdict.fatal { color: var(--alert); }
+.verdict.safe { color: var(--accent); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- the instrument strip ---------- */
+
+.hud {
+  background: var(--hud-bg);
+  border-radius: 3px;
+  padding: 0.85rem 1rem;
+  margin: 1.5rem 0 1.25rem;
+  overflow-x: auto;
+}
+.hud-row {
+  display: flex;
+  gap: 2rem;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  min-width: max-content;
+}
+.hud-row + .hud-row { margin-top: 0.5rem; }
+.hud-row b { color: var(--hud-dim); font-weight: 600; }
+.hud-row i { font-style: normal; color: var(--hud-fg); font-variant-numeric: tabular-nums; white-space: pre; }
+.hud-note {
+  margin: 0 0 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* ---------- envelope chart ---------- */
+
+.figure { margin: 1.75rem 0 1.5rem; }
+.figure svg { display: block; width: 100%; max-width: 30rem; height: auto; }
+.figcaption {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--muted);
+  margin-top: 0.75rem;
+  max-width: 42ch;
+}
+
+/* ---------- review ---------- */
+
+.stamp {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0.5rem 0.85rem;
+  margin: 0 0 1.5rem;
+}
+.stamp b {
+  font-family: var(--display);
+  font-weight: 400;
+  font-size: 0.95rem;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.stamp span {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: 0 2.5rem;
+  margin-top: 1.5rem;
+}
+.cols > div { min-width: 0; }
+
+ul.plain { list-style: none; padding: 0; margin: 0; max-width: var(--col); }
+ul.plain li {
+  padding-left: 1.4rem;
+  position: relative;
+  margin-bottom: 0.85rem;
+}
+ul.plain li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.62em;
+  width: 0.5rem;
+  height: 2px;
+  background: var(--accent-2);
+}
+ul.plain li:last-child { margin-bottom: 0; }
+ul.plain li b { font-weight: 600; }
+
+footer {
+  padding-block: 2.5rem 3.5rem;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--muted);
+  line-height: 1.7;
+}
+footer p { max-width: 52ch; }
+.repopath {
+  font-family: var(--mono);
+  color: var(--fg);
+  background: var(--surface);
+  padding: 0.15em 0.4em;
+  border-radius: 2px;
+  user-select: all;
+}
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <h1 class="wordmark">LUNA LANDER</h1>
+    <p class="tagline">A lunar lander for the Game Boy. Twelve levels a mode, and the landing rule is the whole game.</p>
+    <p class="specstrip">
+      <span>DMG · 1989 hardware</span>
+      <span>32 KB · no mapper</span>
+      <span>24 levels</span>
+      <span>3 sounds</span>
+      <span>Super Game Boy border</span>
+    </p>
+  </header>
+
+  <section>
+    <p class="eyebrow">The game</p>
+    <h2>One ship, one pad, about ten seconds of engine</h2>
+    <p>You fly a lander down onto a lit pad. A life ends the instant the ship's underside reaches the ground under its centre, and the game decides then and there whether you landed or wrecked, and why. There is no health bar and no timer. The clock is the tank: a full one is 600 units, the engine burns one a tick, and at sixty ticks a second that is roughly ten seconds of held thrust. Nothing refills it mid-flight.</p>
+    <p>Gravity does the rest. It never stops pulling, and the longer you leave the ship alone the faster it falls. Every landing is a bet about how much of the tank to spend arriving slowly enough.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Controls</p>
+    <h2>Four buttons do everything</h2>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Button</th><th>What it does</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>d-pad LEFT / RIGHT</td><td>Push the ship that way. Hold to keep pushing and the nose leans into it. Let go and it stands upright again.</td></tr>
+          <tr><td>A or B</td><td>Thrust along the nose. Hold to keep burning; the tank empties the whole time. Both buttons do the same thing, because the DMG has no shoulder pair to put the engine on.</td></tr>
+          <tr><td>START</td><td>Next level after a landing. The same level after a crash. The level over again while you are flying.</td></tr>
+          <tr><td>SELECT</td><td>Back to the title from anywhere. It keeps your place, and the title names the level it will resume.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Sideways movement is held, not stepped. Push a direction and the ship leans over and its speed across the ground builds for as long as the direction is down. Let go and the drift is taken off by friction over the next moment. So a correction is a press and a wait. Pushing sideways burns fuel at the engine's own rate.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Flight</p>
+    <h2>The nose only ever points three ways</h2>
+    <p>Upright, or leaned into whichever direction is held. That is the whole steering model, and it exists because the same heading byte drives both the sprite frame and the thrust vector. The lean is not decoration: a landing made mid-strafe is a landing with the nose off vertical, which is a crash.</p>
+    <p>With the nose up the engine produces exactly twice what gravity takes away, so a held burn climbs steadily. Release it and you fall. That two-to-one ratio is the only reason the game is controllable at all, and it is fixed: gravity and thrust are the same two constants on every level of both modes.</p>
+    <p>The world is 160 pixels wide and wraps. Fly off the left edge and you arrive at the right one. The ground is built so the join is invisible, which is a property of the level generator rather than a hope: every terrain shape it uses is zero at both seam columns, so no choice of depth or amplitude can produce a visible cliff at the wrap.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">The landing rule</p>
+    <h2>Five verdicts, checked in a fixed order</h2>
+    <p>When the ship touches down, the game asks five questions and stops at the first one that fails. The verdict is named on the crashed page, so you are never left guessing what went wrong. Each threshold is compared with a single <code>&gt;</code> at the exact edge.</p>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Verdict</th><th>What it means</th><th>The threshold</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="verdict fatal">NO PAD</td><td>The ground under the ship is not a landing pad. Checked first, because it outranks everything else.</td><td class="num">no pad under the centre column</td></tr>
+          <tr><td class="verdict fatal">TOO FAST</td><td>Still coming down too hard.</td><td class="num">descent &gt; 0.5 px/frame</td></tr>
+          <tr><td class="verdict fatal">DRIFTING</td><td>Still moving sideways.</td><td class="num">sideways &gt; 0.25 px/frame</td></tr>
+          <tr><td class="verdict fatal">TILTED</td><td>The nose was off vertical. One 22.5° step is allowed; the strafe lean is two.</td><td class="num">more than one step</td></tr>
+          <tr><td class="verdict safe">SAFE</td><td>Clear of all four.</td><td class="num">—</td></tr>
+        </tbody>
+        <caption>Order matters. A gentle touchdown on flat, unmarked ground is still a crash, and it is reported as NO PAD whatever else the arrival looked like.</caption>
+      </table>
+    </div>
+
+    <div class="figure">
+      <svg viewBox="0 0 360 260" role="img" aria-labelledby="envtitle envdesc">
+        <title id="envtitle">The safe landing envelope</title>
+        <desc id="envdesc">A chart of sideways speed against descent speed. The safe region is a band across the slower descent speeds and the middle of the sideways range, bounded at 0.25 pixels per frame sideways and 0.5 pixels per frame downwards.</desc>
+
+        <!-- plot frame -->
+        <rect x="56" y="20" width="280" height="192" fill="var(--surface)" stroke="var(--rule)" stroke-width="1"/>
+
+        <!-- gridlines -->
+        <g stroke="var(--rule)" stroke-width="1">
+          <line x1="126" y1="20" x2="126" y2="212"/>
+          <line x1="196" y1="20" x2="196" y2="212"/>
+          <line x1="266" y1="20" x2="266" y2="212"/>
+          <line x1="56" y1="68"  x2="336" y2="68"/>
+          <line x1="56" y1="116" x2="336" y2="116"/>
+          <line x1="56" y1="164" x2="336" y2="164"/>
+        </g>
+
+        <!-- the safe region -->
+        <rect x="126" y="68" width="140" height="96" fill="var(--accent-2)" fill-opacity="0.30" stroke="var(--accent)" stroke-width="1.5"/>
+        <text x="196" y="60" text-anchor="middle" font-family="var(--display)" font-size="11" fill="var(--fg)">SAFE</text>
+
+        <!-- axis arrows -->
+        <g stroke="var(--muted)" stroke-width="1.5" fill="var(--muted)">
+          <line x1="56" y1="224" x2="336" y2="224"/>
+          <polygon points="336,224 328,220 328,228"/>
+          <line x1="40" y1="212" x2="40" y2="20"/>
+          <polygon points="40,20 36,28 44,28"/>
+        </g>
+
+        <!-- tick labels: sideways -->
+        <g font-family="var(--mono)" font-size="10" fill="var(--muted)" text-anchor="middle">
+          <text x="56"  y="240">−0.5</text>
+          <text x="126" y="240">−0.25</text>
+          <text x="196" y="240">0</text>
+          <text x="266" y="240">+0.25</text>
+          <text x="336" y="240">+0.5</text>
+        </g>
+
+        <!-- tick labels: descent -->
+        <g font-family="var(--mono)" font-size="10" fill="var(--muted)" text-anchor="end">
+          <text x="48" y="24">−0.25</text>
+          <text x="48" y="72">0</text>
+          <text x="48" y="120">0.25</text>
+          <text x="48" y="168">0.5</text>
+          <text x="48" y="216">0.75</text>
+        </g>
+
+        <!-- axis titles -->
+        <text x="196" y="256" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--muted)">sideways speed — px per frame</text>
+        <text x="14" y="116" text-anchor="middle" transform="rotate(-90 14 116)" font-family="var(--mono)" font-size="10" fill="var(--muted)">descent speed</text>
+      </svg>
+      <p class="figcaption">Everything outside the shaded band is a crash, and the verdict is whichever edge you crossed. Tilt is not on this chart: it is a third axis, and one 22.5° step of lean is inside the rule while the strafe's two steps are not.</p>
+    </div>
+
+    <p>The margins are deliberately small. You do not have to be perfectly upright or exactly motionless, but there is not much room, and the way to land well is to arrive already under control rather than to correct at the last instant.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Instruments</p>
+    <h2>What the panel is telling you</h2>
+    <p>The bottom two rows of the screen are the instrument panel. They sit over the ground rather than beside it, so the world you can see is the 128 pixels above them. While you are flying, it reads like this:</p>
+
+    <div class="hud">
+      <div class="hud-row"><b>FUEL</b> <i>473</i> <b>ALT</b> <i> 72</i></div>
+      <div class="hud-row"><b>VX</b> <i>&nbsp; 0</i> <b>VY</b> <i>&nbsp; 2</i> <b>PAD X</b> <i>2</i></div>
+    </div>
+    <p class="hud-note">An example readout, mid-descent over the small pad, with the digits laid out as the game lays them out.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Field</th><th>What it is</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>FUEL</td><td>The tank, in three digits. It starts at 600 and counts down only while the engine is running.</td></tr>
+          <tr><td>ALT</td><td>Height in pixels above the ground directly underneath. It counts to zero as you touch down, and it is the number that tells you whether you still have room to correct.</td></tr>
+          <tr><td>VX</td><td>Sideways speed in pixels per frame. Positive is right. This one has to be near zero at touchdown.</td></tr>
+          <tr><td>VY</td><td>Descent speed, positive downwards. This is the one to watch: it has to be small when you arrive.</td></tr>
+          <tr><td>PAD X</td><td>The multiplier of the pad under the ship right now, as a single digit. X2 over the small pad, X1 over the large one, and X0 when there is no pad under you, which is the spot you do not want to land on.</td></tr>
+        </tbody>
+        <caption>VX and VY read 0 until the ship is moving at least a whole pixel a frame, so early in a fall they may say 0 while the ship is quietly gathering speed.</caption>
+      </table>
+    </div>
+
+    <p>The sky is not empty, and the stars are there to be read. High up, the ground is off the screen entirely and the ship is the only other thing moving, so a descent at a steady few pixels a frame looks exactly like hovering. The stars are fixed to the world, so how fast they travel past is your speed: in LANDER they stand still and the ship crosses them, in DESCENT they scroll up with the ground.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Levels</p>
+    <h2>Twelve a mode, the same twelve every time</h2>
+    <p>Each mode is a chain of twelve levels, and they are fixed. Level 3 of LANDER is one piece of ground on this cartridge and on the next one; nothing about a level is decided while you play. Between levels, only the ground changes. Gravity, the engine and the whole landing rule are identical on all twenty-four.</p>
+    <ul class="plain">
+      <li><b>Land and you move on.</b> The page after a landing says so, and START takes you to the next level.</li>
+      <li><b>Crash and you get the same level back.</b> Nothing is lost but the time it took to fall.</li>
+      <li><b>Clear the twelfth and the chain ends</b> on a completion page. START replays the twelve from level 1 on a smaller tank: 60 units less per lap, down to a floor of 300, which is half of what you started with. The layouts never get harder. The tank does.</li>
+      <li><b>Your place is remembered.</b> SELECT back to the title and the mode line still says which level you are on.</li>
+    </ul>
+    <p>The two modes keep their own places, so switching to DESCENT and back to LANDER returns you to whichever level of LANDER you had reached.</p>
+
+    <h3>Where the pads are</h3>
+    <p>Every level has one or two pads, and they are not in the same place from one level to the next. The smaller pad is always worth X2 and the larger one X1. Both are drawn as a lit deck, so where they are is something you can see rather than something you read off the bar. The ship always starts above the X2 pad, so the tempting one is the one you are already lined up on.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Troubleshooting</p>
+    <h2>If you keep crashing</h2>
+    <p>The crashed page names the one that got you. These are what to do about each.</p>
+    <ul class="plain">
+      <li><b>Landing hard on a pad?</b> Watch VY. It has to be small by the time ALT reaches zero, and the place to fix it is while there is still height to do it in.</li>
+      <li><b>Sliding off sideways?</b> Watch VX. Push the other way to take it off, then let go and let the drift run out before you touch down. Do not try to fix it in the last few pixels.</li>
+      <li><b>Wrecked on flat-looking ground?</b> If PAD read X0 you were not on a pad at all. Only the marked platforms count, and the terrain beside them is as fatal as a cliff. Find the lit deck before you commit to a column.</li>
+      <li><b>Out of fuel?</b> You held the engine too long. Short bursts cost far less than one long burn, and gravity is free.</li>
+    </ul>
+  </section>
+
+  <section>
+    <p class="eyebrow">Review</p>
+    <h2>The verdict</h2>
+    <p class="stamp"><b>SAFE LANDING</b> <span>it sticks the landing and runs out of scenery</span></p>
+    <p>LUNA LANDER is a small, sharp, unusually well-built game. Its central idea is genuinely good and, more unusually, it is honest: the rule that ends your life is published, checked in a stated order, and named on the screen when it kills you. Very few games this size tell you exactly why you died, and this one tells you in four words.</p>
+    <p>The constraint that makes it work is that there is almost nothing else. One ship, one engine, one rule, twenty-four pieces of ground. Everything the game has is in that budget, and most of it is spent well.</p>
+
+    <div class="cols">
+      <div>
+        <h3>What it gets right</h3>
+        <ul class="plain">
+          <li><b>The rule is legible.</b> Four named failures, each with a threshold you could write down, and a page that names the one you hit. You learn the game by being told what you did wrong, not by inferring it.</li>
+          <li><b>Fuel is a real clock.</b> Ten seconds of held thrust is a small enough budget that every burn is a decision, and a large enough one that a careful pilot is never actually stuck.</li>
+          <li><b>The pads are drawn as pads.</b> The only lit ground is the safe ground. The HUD still names the multiplier while you fly, but you do not need it: you can see where you may land.</li>
+          <li><b>The stars earn their place.</b> They are a motion reference, and without them a slow descent at the top of a tall level reads as hovering. That is a detail most games never think about.</li>
+          <li><b>The levels are designed, not generated.</b> Twenty-four fixed layouts came out of a generator that refuses to emit an unwinnable one: a spawn that is not over a pad, a drop no tank could survive, a pad on a cliff edge. The generator is an authoring tool, and what shipped is a set.</li>
+          <li><b>It fits.</b> 32 kilobytes, no mapper, a 1989 handheld, and a Super Game Boy border drawn from the same pixels as the game's own font.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Where it runs thin</h3>
+        <ul class="plain">
+          <li><b>Ten silhouettes, twenty-four levels.</b> The generator has five shapes and two amplitudes. LANDER plays one of them three times and another three times; DESCENT does the same with two others. Depth and pad placement vary, so no two levels are identical, but by the sixth or seventh piece of ground you have seen the whole vocabulary and you know it.</li>
+          <li><b>The ramp is a single axis.</b> Within a lap nothing gets harder. Across laps, only the tank shrinks. That is a clean idea and it is applied consistently, but it changes your margin rather than your task: the sixth lap asks for the same flight with less slack, not a different one.</li>
+          <li><b>The score does nothing.</b> The X1 and X2 multipliers are reported on the landing page and then forgotten. Nothing accumulates, nothing is saved, and since you spawn over the X2 pad there is barely a choice to make. It is a scoring system with no score in it.</li>
+          <li><b>Three sounds and no music.</b> The engine, the landing, the wreck, and that is the whole soundtrack. The engine loop is what you hear for the entire game.</li>
+          <li><b>The correction loop is soft.</b> The strafe lean is two 22.5° steps and anything past one step is a crash, so a sideways fix cannot be held through touchdown. You push, release, and wait for friction to bleed the drift off. That is a deliberate design, and it is also, for some hands, a mushy one.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Also here: <strong>PLAY.md</strong> in the repository, the shorter in-tree version of the guide above, and <strong>README.md</strong>, which covers the build and the internals.</p>
+    <p>The ROM is attached to a GitHub release and the source is public at <span class="repopath">github.com/Zapskii/GB-Luna-Lander</span>. It runs on an original Game Boy, a Game Boy Color, or any emulator. On a Super Game Boy it is framed by a rocket scene; anywhere else the border is simply not there.</p>
+  </footer>
+
+</div>

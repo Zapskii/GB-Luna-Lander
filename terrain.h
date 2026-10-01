@@ -4,32 +4,144 @@
 
 #include <stdint.h>
 
-/* Both worlds are 160 px / 8 px per tile WIDE, and neither is one screen
- * wide plus a bit: 160 is NOT a power of two, so the wrap is two compares
+/* Every world is 160 px / 8 px per tile WIDE, and none is one screen wide
+ * plus a bit: 160 is NOT a power of two, so the wrap is two compares
  * (x < 0 -> x += 160; x >= 160 -> x -= 160) and never an `& WORLD_MASK`:
  * masking would wrap at 256 and put the seam off-screen. */
 #define WORLD_COLS 20
 
 /* The ceiling on a surface row, in 8 px TILE units -- the unit mkgfx.py
- * draws the terrain tiles in.  NOT pixels, and NOT the screen: mode 1 only
- * reaches row 15, the DESCENT profile reaches row 100, and the type has to
- * hold both without a refactor. */
+ * draws the terrain tiles in.  NOT pixels, and NOT the screen: the LANDER
+ * levels stop at row 16 and the DESCENT ones reach row 100, and the type
+ * has to hold both without a refactor. */
 #define TERRAIN_MAX_TILES 255
 
-/* LANDER's surface row (tile units) at each world tile column.  Periodic
- * in WORLD_COLS: a ripple of period 4 inside a swell of period 20,
- * both dividing 20, so the wrap seam is invisible.  Rows 12..15.
- * One screen tall -- the world IS the screen, so main.c windows it
- * at row 0 and the offset arithmetic is the identity there. */
+/* LANDER L1 -- ripple x1 from base 12.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (4, 20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 12..15.  The pads are carved flat into it at x1@15 (cols 4..7), x2@12 (cols 13..14). */
 static const uint8_t terrain_lander[WORLD_COLS] = {
      12,  13,  13,  12,  15,  15,  15,  15,  14,  15,
      15,  14,  13,  12,  12,  13,  12,  13,  13,  12,
 };
 
-/* DESCENT's surface row (tile units) at each world tile column.  Periodic
- * in WORLD_COLS: a ripple of period 4 inside a swell of period 20,
- * both dividing 20, so the wrap seam is invisible.  Rows 96..100.
- * TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+/* LANDER L2 -- roller x1 from base 11.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (10) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 11..15.  The pads are carved flat into it at x1@13 (cols 1..3), x2@13 (cols 15..17). */
+static const uint8_t terrain_lander_l2[WORLD_COLS] = {
+     11,  13,  13,  13,  15,  15,  14,  13,  12,  11,
+     11,  12,  13,  14,  15,  13,  13,  13,  12,  11,
+};
+
+/* LANDER L3 -- basin x1 from base 11.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 11..15.  The pads are carved flat into it at x1@13 (cols 2..4), x2@11 (cols 16..18). */
+static const uint8_t terrain_lander_l3[WORLD_COLS] = {
+     11,  11,  13,  13,  13,  13,  14,  14,  15,  15,
+     15,  15,  14,  14,  13,  13,  11,  11,  11,  11,
+};
+
+/* LANDER L4 -- mound x1 from base 15.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 11..15.  The pads are carved flat into it at x1@12 (cols 5..7), x2@12 (cols 13..15). */
+static const uint8_t terrain_lander_l4[WORLD_COLS] = {
+     15,  15,  14,  14,  13,  12,  12,  12,  11,  11,
+     11,  11,  12,  12,  12,  12,  14,  14,  15,  15,
+};
+
+/* LANDER L5 -- chop x1 from base 12.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (5, 4) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 12..15.  The pads are carved flat into it at x1@13 (cols 5..7), x2@14 (cols 12..13). */
+static const uint8_t terrain_lander_l5[WORLD_COLS] = {
+     12,  14,  15,  13,  12,  13,  13,  13,  13,  13,
+     13,  13,  14,  14,  13,  12,  13,  15,  14,  12,
+};
+
+/* LANDER L6 -- roller x2 from base 7.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (10) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 7..15.  The pads are carved flat into it at x1@13 (cols 2..4), x2@13 (cols 13..15). */
+static const uint8_t terrain_lander_l6[WORLD_COLS] = {
+      7,   9,  13,  13,  13,  15,  13,  11,   9,   7,
+      7,   9,  11,  13,  13,  13,  13,  11,   9,   7,
+};
+
+/* LANDER L7 -- basin x2 from base 7.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 7..15.  The pads are carved flat into it at x1@9 (cols 1..3), x2@11 (cols 14..16). */
+static const uint8_t terrain_lander_l7[WORLD_COLS] = {
+      7,   9,   9,   9,  11,  11,  13,  13,  15,  15,
+     15,  15,  13,  13,  11,  11,  11,   9,   7,   7,
+};
+
+/* LANDER L8 -- mound x2 from base 15.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 7..15.  The pads are carved flat into it at x1@11 (cols 4..6), x2@9 (cols 13..15). */
+static const uint8_t terrain_lander_l8[WORLD_COLS] = {
+     15,  15,  13,  13,  11,  11,  11,   9,   7,   7,
+      7,   7,   9,   9,   9,   9,  13,  13,  15,  15,
+};
+
+/* LANDER L9 -- ripple x2 from base 6.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (4, 20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 6..12.  The pads are carved flat into it at x1@10 (cols 4..6), x2@8 (cols 14..16). */
+static const uint8_t terrain_lander_l9[WORLD_COLS] = {
+      6,   8,   8,   6,  10,  10,  10,   8,  10,  12,
+     12,  10,   8,  10,   8,   8,   8,   8,   8,   6,
+};
+
+/* LANDER L10 -- chop x2 from base 6.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (5, 4) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 6..12.  The pads are carved flat into it at x1@10 (cols 1..3), x2@10 (cols 12..14). */
+static const uint8_t terrain_lander_l10[WORLD_COLS] = {
+      6,  10,  10,  10,   6,   8,  10,  10,   8,   8,
+      8,   8,  10,  10,  10,   6,   8,  12,  10,   6,
+};
+
+/* LANDER L11 -- roller x1 from base 13.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (10) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 13..16.  The pads are carved flat into it at x1@15 (cols 3..5), x2@15 (cols 14..16). */
+static const uint8_t terrain_lander_l11[WORLD_COLS] = {
+     13,  14,  15,  15,  15,  15,  16,  15,  14,  13,
+     13,  14,  15,  16,  15,  15,  15,  15,  14,  13,
+};
+
+/* LANDER L12 -- chop x1 from base 13.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (5, 4) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 13..16.  The pads are carved flat into it at x1@14 (cols 6..8), x2@15 (cols 13..14). */
+static const uint8_t terrain_lander_l12[WORLD_COLS] = {
+     13,  15,  16,  14,  13,  14,  14,  14,  14,  14,
+     14,  14,  15,  15,  15,  13,  14,  16,  15,  13,
+};
+
+/* DESCENT L1 -- ripple x1 from base 96.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (4, 20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 96..100.  The pads are carved flat into it at x1@100 (cols 4..7), x2@97 (cols 13..14). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
  * there is no blit that puts these rows on one map, which is why
  * main.c draws a WINDOW of it rather than the whole profile. */
 static const uint8_t terrain_descent[WORLD_COLS] = {
@@ -37,34 +149,353 @@ static const uint8_t terrain_descent[WORLD_COLS] = {
      99,  98,  97,  97,  97,  97,  96,  97,  97,  96,
 };
 
+/* DESCENT L2 -- roller x1 from base 52.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (10) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 52..56.  The pads are carved flat into it at x1@54 (cols 1..3), x2@54 (cols 15..17). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l2[WORLD_COLS] = {
+     52,  54,  54,  54,  56,  56,  55,  54,  53,  52,
+     52,  53,  54,  55,  56,  54,  54,  54,  53,  52,
+};
+
+/* DESCENT L3 -- basin x1 from base 37.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 37..41.  The pads are carved flat into it at x1@39 (cols 2..4), x2@37 (cols 16..18). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l3[WORLD_COLS] = {
+     37,  37,  39,  39,  39,  39,  40,  40,  41,  41,
+     41,  41,  40,  40,  39,  39,  37,  37,  37,  37,
+};
+
+/* DESCENT L4 -- mound x1 from base 44.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 40..44.  The pads are carved flat into it at x1@41 (cols 5..7), x2@41 (cols 13..15). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l4[WORLD_COLS] = {
+     44,  44,  43,  43,  42,  41,  41,  41,  40,  40,
+     40,  40,  41,  41,  41,  41,  43,  43,  44,  44,
+};
+
+/* DESCENT L5 -- chop x1 from base 61.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (5, 4) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 61..64.  The pads are carved flat into it at x1@62 (cols 6..8), x2@63 (cols 12..13). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l5[WORLD_COLS] = {
+     61,  63,  64,  62,  61,  62,  62,  62,  62,  62,
+     62,  62,  63,  63,  62,  61,  62,  64,  63,  61,
+};
+
+/* DESCENT L6 -- roller x2 from base 68.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (10) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 68..76.  The pads are carved flat into it at x1@76 (cols 3..5), x2@74 (cols 13..15). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l6[WORLD_COLS] = {
+     68,  70,  72,  76,  76,  76,  74,  72,  70,  68,
+     68,  70,  72,  74,  74,  74,  74,  72,  70,  68,
+};
+
+/* DESCENT L7 -- basin x2 from base 55.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 55..63.  The pads are carved flat into it at x1@57 (cols 1..3), x2@59 (cols 14..16). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l7[WORLD_COLS] = {
+     55,  57,  57,  57,  59,  59,  61,  61,  63,  63,
+     63,  63,  61,  61,  59,  59,  59,  57,  55,  55,
+};
+
+/* DESCENT L8 -- mound x2 from base 72.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 64..72.  The pads are carved flat into it at x1@68 (cols 4..6), x2@66 (cols 13..15). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l8[WORLD_COLS] = {
+     72,  72,  70,  70,  68,  68,  68,  66,  64,  64,
+     64,  64,  66,  66,  66,  66,  70,  70,  72,  72,
+};
+
+/* DESCENT L9 -- ripple x2 from base 82.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (4, 20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 82..88.  The pads are carved flat into it at x1@86 (cols 4..6), x2@84 (cols 14..16). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l9[WORLD_COLS] = {
+     82,  84,  84,  82,  86,  86,  86,  84,  86,  88,
+     88,  86,  84,  86,  84,  84,  84,  84,  84,  82,
+};
+
+/* DESCENT L10 -- chop x2 from base 49.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (5, 4) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 49..55.  The pads are carved flat into it at x1@51 (cols 1..3), x2@53 (cols 12..14). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l10[WORLD_COLS] = {
+     49,  51,  51,  51,  49,  51,  53,  53,  51,  51,
+     51,  51,  53,  53,  53,  49,  51,  55,  53,  49,
+};
+
+/* DESCENT L11 -- roller x1 from base 88.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (10) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 88..92.  The pads are carved flat into it at x1@92 (cols 3..5), x2@92 (cols 14..16). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l11[WORLD_COLS] = {
+     88,  89,  90,  92,  92,  92,  91,  90,  89,  88,
+     88,  89,  90,  91,  92,  92,  92,  90,  89,  88,
+};
+
+/* DESCENT L12 -- mound x1 from base 100.  Surface row (tile units) at
+ * each world tile column.  Periodic in WORLD_COLS -- the period
+ * (20) divides 20, so the wrap seam is invisible by construction,
+ * and the kernel is 0 at both seam columns whatever the base is.
+ * Rows 96..100.  The pads are carved flat into it at x1@97 (cols 5..7), x2@97 (cols 13..15). */
+/* TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent_l12[WORLD_COLS] = {
+    100, 100,  99,  99,  98,  97,  97,  97,  96,  96,
+     96,  96,  97,  97,  97,  97,  99,  99, 100, 100,
+};
+
 /* THE ACTIVE PROFILE, and the one symbol in this header that is not a
  * constant.  sim.h's ship_step() reads terrain[col] to find the ground
  * under the ship and tools/probe.py reads terrain out of the linker map, so
- * the two worlds share THIS name rather than one array being renamed per
- * mode -- a second name would break the collision call and the probe's
+ * all 24 worlds share THIS name rather than one array being renamed per
+ * level -- a second name would break the collision call and the probe's
  * address lookup together, and the mismatch would look like a physics bug.
- * main.c assigns it; everything else just reads through it. */
+ * main.c assigns it out of the Level table below; everything else reads
+ * through it. */
 static const uint8_t *terrain = terrain_lander;
 
-/* The flat landing runs.  col0/col1 are inclusive world tile columns; mult
- * is the score multiplier for a landing that stays on the pad.  The span is
- * flat (mklevel.py asserts it for BOTH worlds), so terrain[col0..col1] is
- * all one row -- at a different depth in each: the DESCENT world's pads sit
- * on its own pad_rows, and sim.h's pad_mult() is a question about columns,
- * which is why the spans are shared. */
+/* One landing site: col0/col1 are inclusive world tile columns and mult is
+ * the score multiplier for a landing that stays on the pad.  The span is
+ * flat -- mklevel.py asserts it for every level -- so terrain[col0..col1] is
+ * one row, at whatever depth that level put it. */
 typedef struct {
     uint8_t col0;
     uint8_t col1;
     uint8_t mult;
 } Pad;
 
+/* A level declares one to three pads and the generator pads the table out
+ * to PAD_COUNT with a sentinel whose col0 is 255.  No column of a 20-wide
+ * world can satisfy `col <= col1` for it, so sim.h's pad_mult() walks past
+ * it and answers 0 exactly as it does for bare ground -- which is what lets
+ * this stay a compile-time bound on the collision hot path. */
 #define PAD_COUNT 2
-#define PAD_LOW      0
-#define PAD_HIGH     1
 
-static const Pad pads[PAD_COUNT] = {
-    {  4,  7, 1 },  /* LOW */
-    { 13, 14, 2 },  /* HIGH */
+/* Level 1's two slots, named because tests/test_sim.c indexes them.  Level 1
+ * of each chain is the world this game has always booted into, and slot 0 is
+ * its x1 pad and slot 1 its x2 pad. */
+#define PAD_LOW  0
+#define PAD_HIGH 1
+
+static const Pad pads_lander_l1[PAD_COUNT] = {
+    {   4,   7, 1 },  /* LOW @row 15 */
+    {  13,  14, 2 },  /* HIGH @row 12 */
+};
+
+static const Pad pads_lander_l2[PAD_COUNT] = {
+    {   1,   3, 1 },  /* LOW @row 13 */
+    {  15,  17, 2 },  /* HIGH @row 13 */
+};
+
+static const Pad pads_lander_l3[PAD_COUNT] = {
+    {   2,   4, 1 },  /* LOW @row 13 */
+    {  16,  18, 2 },  /* HIGH @row 11 */
+};
+
+static const Pad pads_lander_l4[PAD_COUNT] = {
+    {   5,   7, 1 },  /* LOW @row 12 */
+    {  13,  15, 2 },  /* HIGH @row 12 */
+};
+
+static const Pad pads_lander_l5[PAD_COUNT] = {
+    {   5,   7, 1 },  /* LOW @row 13 */
+    {  12,  13, 2 },  /* HIGH @row 14 */
+};
+
+static const Pad pads_lander_l6[PAD_COUNT] = {
+    {   2,   4, 1 },  /* LOW @row 13 */
+    {  13,  15, 2 },  /* HIGH @row 13 */
+};
+
+static const Pad pads_lander_l7[PAD_COUNT] = {
+    {   1,   3, 1 },  /* LOW @row 9 */
+    {  14,  16, 2 },  /* HIGH @row 11 */
+};
+
+static const Pad pads_lander_l8[PAD_COUNT] = {
+    {   4,   6, 1 },  /* LOW @row 11 */
+    {  13,  15, 2 },  /* HIGH @row 9 */
+};
+
+static const Pad pads_lander_l9[PAD_COUNT] = {
+    {   4,   6, 1 },  /* LOW @row 10 */
+    {  14,  16, 2 },  /* HIGH @row 8 */
+};
+
+static const Pad pads_lander_l10[PAD_COUNT] = {
+    {   1,   3, 1 },  /* LOW @row 10 */
+    {  12,  14, 2 },  /* HIGH @row 10 */
+};
+
+static const Pad pads_lander_l11[PAD_COUNT] = {
+    {   3,   5, 1 },  /* LOW @row 15 */
+    {  14,  16, 2 },  /* HIGH @row 15 */
+};
+
+static const Pad pads_lander_l12[PAD_COUNT] = {
+    {   6,   8, 1 },  /* LOW @row 14 */
+    {  13,  14, 2 },  /* HIGH @row 15 */
+};
+
+static const Pad pads_descent_l1[PAD_COUNT] = {
+    {   4,   7, 1 },  /* LOW @row 100 */
+    {  13,  14, 2 },  /* HIGH @row 97 */
+};
+
+static const Pad pads_descent_l2[PAD_COUNT] = {
+    {   1,   3, 1 },  /* LOW @row 54 */
+    {  15,  17, 2 },  /* HIGH @row 54 */
+};
+
+static const Pad pads_descent_l3[PAD_COUNT] = {
+    {   2,   4, 1 },  /* LOW @row 39 */
+    {  16,  18, 2 },  /* HIGH @row 37 */
+};
+
+static const Pad pads_descent_l4[PAD_COUNT] = {
+    {   5,   7, 1 },  /* LOW @row 41 */
+    {  13,  15, 2 },  /* HIGH @row 41 */
+};
+
+static const Pad pads_descent_l5[PAD_COUNT] = {
+    {   6,   8, 1 },  /* LOW @row 62 */
+    {  12,  13, 2 },  /* HIGH @row 63 */
+};
+
+static const Pad pads_descent_l6[PAD_COUNT] = {
+    {   3,   5, 1 },  /* LOW @row 76 */
+    {  13,  15, 2 },  /* HIGH @row 74 */
+};
+
+static const Pad pads_descent_l7[PAD_COUNT] = {
+    {   1,   3, 1 },  /* LOW @row 57 */
+    {  14,  16, 2 },  /* HIGH @row 59 */
+};
+
+static const Pad pads_descent_l8[PAD_COUNT] = {
+    {   4,   6, 1 },  /* LOW @row 68 */
+    {  13,  15, 2 },  /* HIGH @row 66 */
+};
+
+static const Pad pads_descent_l9[PAD_COUNT] = {
+    {   4,   6, 1 },  /* LOW @row 86 */
+    {  14,  16, 2 },  /* HIGH @row 84 */
+};
+
+static const Pad pads_descent_l10[PAD_COUNT] = {
+    {   1,   3, 1 },  /* LOW @row 51 */
+    {  12,  14, 2 },  /* HIGH @row 53 */
+};
+
+static const Pad pads_descent_l11[PAD_COUNT] = {
+    {   3,   5, 1 },  /* LOW @row 92 */
+    {  14,  16, 2 },  /* HIGH @row 92 */
+};
+
+static const Pad pads_descent_l12[PAD_COUNT] = {
+    {   5,   7, 1 },  /* LOW @row 97 */
+    {  13,  15, 2 },  /* HIGH @row 97 */
+};
+
+/* THE ACTIVE PAD TABLE, the second symbol that is not a constant, and a
+ * pointer for exactly the reason `terrain` above is one: sim.h's pad_mult()
+ * and tools/probe.py both have to reach the CURRENT level's pads through one
+ * name.  main.c assigns it beside `terrain`, out of the same Level row. */
+static const Pad *pads = pads_lander_l1;
+
+/* A LEVEL: which profile, which pads, and where the ship opens in it.  The
+ * spawn is per level rather than a constant in main.c because it is part of
+ * the design -- it has to be over a pad, and mklevel.py rejects a level where
+ * it is not.  x is the ship's left edge in px and y its top edge; ship_init()
+ * writes them straight into the state. */
+typedef struct {
+    const uint8_t *profile;
+    const Pad     *pads;
+    uint8_t        spawn_x;
+    uint8_t        spawn_y;
+} Level;
+
+#define LANDER_LEVELS 12
+#define DESCENT_LEVELS 12
+
+/* The LANDER chain, in the order a landing walks it. */
+static const Level levels_lander[LANDER_LEVELS] = {
+    { terrain_lander, pads_lander_l1, 108, 16 },  /* L1 */
+    { terrain_lander_l2, pads_lander_l2, 124, 16 },  /* L2 */
+    { terrain_lander_l3, pads_lander_l3, 132, 16 },  /* L3 */
+    { terrain_lander_l4, pads_lander_l4, 108, 16 },  /* L4 */
+    { terrain_lander_l5, pads_lander_l5,  92, 16 },  /* L5 */
+    { terrain_lander_l6, pads_lander_l6, 108, 16 },  /* L6 */
+    { terrain_lander_l7, pads_lander_l7, 116, 16 },  /* L7 */
+    { terrain_lander_l8, pads_lander_l8, 108, 16 },  /* L8 */
+    { terrain_lander_l9, pads_lander_l9, 116, 16 },  /* L9 */
+    { terrain_lander_l10, pads_lander_l10, 100, 16 },  /* L10 */
+    { terrain_lander_l11, pads_lander_l11, 116, 16 },  /* L11 */
+    { terrain_lander_l12, pads_lander_l12, 100, 16 },  /* L12 */
+};
+
+/* The DESCENT chain, in the order a landing walks it. */
+static const Level levels_descent[DESCENT_LEVELS] = {
+    { terrain_descent, pads_descent_l1, 108, 16 },  /* L1 */
+    { terrain_descent_l2, pads_descent_l2, 124, 16 },  /* L2 */
+    { terrain_descent_l3, pads_descent_l3, 132, 16 },  /* L3 */
+    { terrain_descent_l4, pads_descent_l4, 108, 16 },  /* L4 */
+    { terrain_descent_l5, pads_descent_l5,  92, 16 },  /* L5 */
+    { terrain_descent_l6, pads_descent_l6, 108, 16 },  /* L6 */
+    { terrain_descent_l7, pads_descent_l7, 116, 16 },  /* L7 */
+    { terrain_descent_l8, pads_descent_l8, 108, 16 },  /* L8 */
+    { terrain_descent_l9, pads_descent_l9, 116, 16 },  /* L9 */
+    { terrain_descent_l10, pads_descent_l10, 100, 16 },  /* L10 */
+    { terrain_descent_l11, pads_descent_l11, 116, 16 },  /* L11 */
+    { terrain_descent_l12, pads_descent_l12, 108, 16 },  /* L12 */
 };
 
 /* THE SKY.  main.c's row_blit() indexes this with
@@ -74,6 +505,10 @@ static const Pad pads[PAD_COUNT] = {
  * lets it be a pure function of a WORLD row.  DESCENT streams its rows in
  * whatever order the camera asks for and re-blits them as the ring wraps,
  * so a table the ring had to carry would come back shuffled.
+ *
+ * ONE FIELD FOR ALL 24 LEVELS, because it is a motion reference and not a
+ * layout: nothing lands on a star, so a level that reshuffled the sky would
+ * be spending bytes on a difference the player cannot fly against.
  *
  * THE LIST IS `column, tile` PAIRS, terminated by STAR_END (255), and not
  * a WORLD_COLS-wide row: row_blit() runs once per streamed row per tick
