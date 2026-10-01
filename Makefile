@@ -79,7 +79,11 @@ shot: $(ROM)
 test: tests/test_sim
 	./tests/test_sim
 
-tests/test_sim: tests/test_sim.c
+# sim.h, tables.h and terrain.h are on the line for the same reason they are on
+# the ROM's: they are what the test actually compiles, so a `make test` after
+# `make level` that did NOT relink would grade the previous headers' binary and
+# print OK -- the false PASS this project keeps an eye out for.
+tests/test_sim: tests/test_sim.c sim.h tables.h terrain.h
 	gcc -std=c99 -Wall -Wextra -o $@ tests/test_sim.c
 
 gfx:

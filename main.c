@@ -43,6 +43,16 @@
  * three APU boot writes that make any of them audible at all -- see the sound
  * section below, and the essay on the boot lines for why silence here has no
  * diagnostic.
+ *
+ * P9 is the second profile and the WINDOW.  terrain.h stopped being one world:
+ * it is two profiles over the same twenty columns -- LANDER's, one screen
+ * tall, and the DESCENT's, a hundred tiles deep -- and ONE `terrain` pointer
+ * that says which is live.  A pointer and not a name per mode, because sim.h's
+ * collision and tools/probe.py both read that symbol, and two names would put
+ * the screen and the physics on different worlds.  What the renderer gained is
+ * blit_window(): the visible 18 rows come from a world ROW OFFSET, which is
+ * the only way a profile taller than the BG map can be drawn at all.  P9 calls
+ * it once, at a fixed offset, before any motion exists to confuse it.
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -62,6 +72,19 @@ typedef char ship_frames_fit[(ROT_STEPS <= GFX_SPRITE_COUNT) ? 1 : -1];
  * whole of what a player can see and the whole of what this file writes. */
 #define VIEW_W 20
 #define VIEW_H 18
+
+/* The DESCENT world's opening screen: the profile row the TOP of the screen
+ * sits on, i.e. how far down the world the window has been wound.
+ *
+ * A fixed constant and not a camera -- P9 draws the descent's opening screen
+ * and nothing else, so there is no offset variable, no scroll and no streaming.
+ * It is NONZERO on purpose: the window arithmetic is the one genuinely new
+ * piece of rendering this phase adds, and at row 0 it would be the identity
+ * and prove nothing.  The DESCENT profile's surface is at rows 96..100, so a
+ * window at 84 puts the ground in the lower third with sky above it -- which
+ * is what an opening screen of a DESCENT is.  At row 0 every column of it
+ * would be empty sky. */
+#define DESCENT_ROW0 84
 
 /* Which screen this iteration builds.  ST_TITLE and ST_PLAY are this file's;
  * the other two states the game has are sim.h's ST_CRASH and ST_LANDED, and
@@ -404,45 +427,85 @@ static void build_hud(void)
     }
 }
 
-/* The play field's STATIC half: sky, and the height profile out of terrain.h.
+/* The visible rows of the ACTIVE profile -- a WINDOW on it, not its first rows.
+ *
+ * world_row0 is the profile row the top of the screen sits on: screen row r is
+ * world row world_row0 + r.  Every cell is written -- sky above the surface,
+ * the surface tile on it, body below -- so this fills the whole buffer and
+ * there is no bg_clear() to forget.
  *
  * terrain[col] is a TILE row, not a pixel row -- the 8 px tile mkgfx.py draws
  * the art in -- so there is no `<< 3` anywhere here.  A `<< 3` is the classic
  * "heights are pixels" slip and it would drop the ground eight rows and push
  * the bottom of it off the screen, which still LOOKS like terrain.
  *
- * There is no camera yet, so world column N IS screen column N and the whole
- * 160 px world is on screen at once.
+ * THIS is what makes a profile deeper than the BG map drawable at all.  One map
+ * is 32x32 tiles, so a profile that reaches row 100 has rows with nowhere to
+ * go: a blit that tried to write them would be TRUNCATED at row 31 by the map
+ * and say nothing about it, and the old per-column fill simply had no tile to
+ * put on screen below the view.  terrain.h asserts the DESCENT profile is
+ * taller than a map (MAP_TILES) for exactly that reason.
  *
- * The buffer is walked with an index that STEPS by the stride rather than one
- * recomputed per cell: VIEW_W is 20, which is not a power of two, and `r *
- * VIEW_W` inside this loop is a multiply per tile.  A stride this file cannot
- * shift is a stride to add, not to multiply by.
+ * There is still no camera: world COLUMN N is screen column N.  Only the rows
+ * are windowed, and P9 winds that offset once, here.
  *
- * Called ONCE, when the title is cleared -- see the write below -- because this
- * is the half of the screen that does not move. */
-static void build_field(void)
+ * The buffer is walked with an index that INCREMENTS rather than one recomputed
+ * per cell: VIEW_W is 20, which is not a power of two, and `r * VIEW_W` inside
+ * this loop is a multiply per tile.  A stride this file cannot shift is a
+ * stride to add, not to multiply by. */
+static void blit_window(uint8_t world_row0)
 {
-    uint8_t col, top, r;
-    uint16_t i;
+    uint8_t col, r;
+    uint16_t i = 0;
 
-    bg_clear();
+    for (r = 0; r < VIEW_H; r++) {
+        uint8_t wr = (uint8_t)(world_row0 + r);
 
-    for (col = 0; col < WORLD_COLS; col++) {
-        top = terrain[col];                 /* surface row, tile units */
+        for (col = 0; col < WORLD_COLS; col++) {
+            uint8_t top = terrain[col];     /* surface row, tile units */
 
-        /* A surface below the view has no tile to put on screen.  M1's profile
-         * never reaches this; M2's DESCENT does. */
-        if (top >= VIEW_H)
-            continue;
-
-        i = (uint16_t)(top * VIEW_W + col);
-        bg[i] = T_TERRAIN_TOP;
-        for (r = (uint8_t)(top + 1); r < VIEW_H; r++) {
-            i = (uint16_t)(i + VIEW_W);
-            bg[i] = T_TERRAIN;
+            bg[i++] = (wr < top) ? T_BLANK
+                    : (wr == top) ? T_TERRAIN_TOP : T_TERRAIN;
         }
     }
+}
+
+/* Which world the play field opens on, and the profile row its top edge sits
+ * on.  It returns the window offset so the ONE call to blit_window() below
+ * takes it directly, and it is the ONLY place `terrain` is ever assigned.
+ *
+ * `terrain` is ONE symbol.  sim.h's ship_step() reads terrain[col] to find the
+ * ground and tools/probe.py reads it out of the linker map, so the two profiles
+ * are two arrays and this is the pointer that says which is live.  A second
+ * array called terrain per mode, or a renderer that read a different table from
+ * the one the collision reads, is the trap: the screen would draw one world and
+ * the ship would land in the other, and that reads as a physics bug.
+ *
+ * LANDER is the world it has always been -- 160 px wide and one screen tall --
+ * so its window starts at row 0 and the offset arithmetic is the identity
+ * there.  That is deliberate: it is what keeps this phase's rendering identical
+ * to P6's, so P2's and P5's checks are still checks on the game and not on a
+ * rewrite.  DESCENT is deeper than a BG map, so it opens partway down.
+ *
+ * M2 is where the descent becomes a game.  P9 draws its opening screen and
+ * nothing else: no scroll, no streaming, and no spawn or physics that knows the
+ * mode. */
+static uint8_t field_open(void)
+{
+    if (pick == MODE_DESCENT) {
+        terrain = terrain_descent;
+        return DESCENT_ROW0;
+    }
+    terrain = terrain_lander;
+    return 0;
+}
+
+/* The play field's STATIC half, built once when the title is cleared and
+ * blitted whole -- see the write below -- because this is the half of the
+ * screen that does not move. */
+static void build_field(void)
+{
+    blit_window(field_open());
 }
 
 /* The title: the name, the mode it is offering, and how to start.

@@ -67,7 +67,17 @@ T_DIGIT0, T_LETTER0, T_MINUS = 20, 30, 56
 # which is why the wrap in sim.h is two compares and never an & WORLD_MASK.
 WORLD_COLS = 20
 PAD_COUNT = 2
-PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at
+PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at,
+                                # for the LANDER profile p2_terrain runs against
+
+# P9's two numbers, mirrored for the same reason the tile ids are.  MAP_TILES
+# is one BG map (32x32), which is the bound a profile that does not fit has to
+# be blitted around; DESCENT_ROW0 is the profile row main.c's window top edge
+# sits on, and it is nonzero on purpose -- the phase's whole target is that the
+# surface tile lands where the OFFSET puts it, not where the profile's first
+# rows are.
+MAP_TILES = 32
+DESCENT_ROW0 = 84
 
 # main.c's screen state and its HUD layout, mirrored for the same reason the
 # tile ids are.  Where a number SITS is part of the HUD, not a detail of it: a
@@ -252,6 +262,29 @@ class Game:
     def u16(self, name):
         b = self.p.memory[self.addr[name]:self.addr[name] + 2]
         return b[0] | (b[1] << 8)
+
+    def profile(self, name):
+        """A named profile's bytes, straight out of the ROM's own memory.
+
+        Read at the ARRAY's own symbol and not through `terrain`: the question
+        here is what the GENERATOR put in the ROM, and a probe that asked the
+        selected pointer could not tell a profile that never made it into the
+        build from one that did."""
+        a = self.addr[name]
+        return list(self.p.memory[a:a + WORLD_COLS])
+
+    def active_profile(self):
+        """The bytes `terrain` currently POINTS AT.
+
+        `terrain` is a POINTER as of P9, not the array itself: two profiles
+        share the ONE symbol so that sim.h's collision and this file keep
+        reading what the renderer reads.  Reading WORLD_COLS bytes at the
+        symbol's own address would hand back the pointer's two bytes and
+        eighteen bytes of whatever the linker put after it -- which is a
+        plausible-looking list of small numbers, and would read as a terrain
+        bug rather than as a dereference that was never taken."""
+        a = self.u16("terrain")
+        return list(self.p.memory[a:a + WORLD_COLS])
 
     def ship(self):
         """The ship's own state, field by field (see the offset table above)."""
@@ -456,8 +489,10 @@ def p2_terrain(g):
 
     # Read the level out of the ROM's OWN memory, not out of terrain.h.  The
     # question is what the ROM was BUILT with, and a probe that read the header
-    # would pass on a terrain.h that never made it into the ROM.
-    h = g.var("terrain", WORLD_COLS)
+    # would pass on a terrain.h that never made it into the ROM.  As of P9
+    # `terrain` is the selected profile POINTER, so this goes through it rather
+    # than reading at the symbol -- see Game.active_profile().
+    h = g.active_profile()
 
     # Every column's surface tile is at that column's terrain row.  This is the
     # whole target: the renderer and the data agreeing, cell by cell.
@@ -788,8 +823,9 @@ def p5_landing(g):
     # The level, out of the ROM's OWN memory, and the column the ship's own
     # spawn x stands on.  The check has to agree with the ROM about where the
     # ship is and what is under it -- reading main.c's or sim.h's constants
-    # here would make this a check on the comments.
-    h = g.var("terrain", WORLD_COLS)
+    # here would make this a check on the comments.  As of P9 this is the
+    # SELECTED profile, through the pointer rather than at the symbol.
+    h = g.active_profile()
     raw = g.var("pads", PAD_COUNT * 3)
     pads = [(raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]) for i in range(PAD_COUNT)]
 
@@ -973,8 +1009,13 @@ def p6_hud(g):
     # the surface the ROM's OWN terrain table puts under it.  A HUD that showed
     # the height above the SPAWN, or a depth fallen, is a number that moves with
     # the ship too, and only this comparison tells the two apart.
+    # As of P9 `terrain` is the selected profile POINTER, so this dereferences
+    # like p2_terrain and p5_landing do.  Reading WORLD_COLS bytes AT the symbol
+    # hands back the pointer's own two bytes plus whatever follows, which is a
+    # plausible list of small numbers -- the check fails with a nonsense
+    # altitude that reads as a physics bug rather than as a missed dereference.
     col = ((b["x"] + SHIP_W // 2) >> 3) % WORLD_COLS
-    want = g.var("terrain", WORLD_COLS)[col] * 8 - (b["y"] + SHIP_H)
+    want = g.active_profile()[col] * 8 - (b["y"] + SHIP_H)
     alt = g.hud_num(HUD_ALT_ROW, HUD_ALT_COL, HUD_ALT_W)
     check(alt is not None and abs(alt - want) <= 1,
           "and ALT is the height of the ship's underside over the ground beneath "
@@ -1177,10 +1218,87 @@ def p7_sound(g):
           % (g.ship()["state"], ticks, land, land >> 4))
 
 
+# ------------------------------------------------------------------ P9 -----
+def p9_window(g):
+    """The visible rows are a WINDOW on the profile, not the profile's first
+    rows -- and they come from the ACTIVE profile, through the one symbol both
+    the renderer and sim.h's collision read.
+
+    Every assertion here is about the OFFSET.  At window row 0 the arithmetic
+    is the identity, so a blit that ignored the offset entirely would pass a
+    check written that way; DESCENT_ROW0 is nonzero and every one of the
+    descent's columns has its surface below the bottom of the screen at row 0,
+    which is asserted at the end as the reason the offset has to exist.
+    """
+    print("P9 window")
+    # A symbol this phase introduces being ABSENT is an assertion failure, not
+    # a harness error: that is the power gate on the P8 ROM, and it answers 1.
+    if not g.need("terrain", "terrain_lander", "terrain_descent"):
+        return
+
+    lander = g.profile("terrain_lander")
+    descent = g.profile("terrain_descent")
+
+    check(lander != descent and len(lander) == len(descent) == WORLD_COLS,
+          "the two profiles are distinct from each other -- %r against %r"
+          % (lander, descent))
+    check(max(descent) > MAP_TILES > max(lander),
+          "and the DESCENT profile is deeper than one BG map -- %d tiles "
+          "against the map's %d, where LANDER's deepest is %d and fits on one "
+          "screen" % (max(descent), MAP_TILES, max(lander)))
+
+    g.run(150)
+    g.run(4, "T")           # SELECT: flip the title to DESCENT (an EDGE)
+    g.run(2)                # button-free: the next press is an EDGE
+    check(g.var("pick") == 1,
+          "the title selected the DESCENT half (pick %d)" % g.var("pick"))
+    g.run(8, "S")           # START clears the title, hands the field over
+    g.run(2)
+
+    check(g.u16("terrain") == g.addr["terrain_descent"]
+          and g.active_profile() == descent,
+          "and the one `terrain` symbol points at the DESCENT profile "
+          "(terrain -> 0x%04X, terrain_descent at 0x%04X)"
+          % (g.u16("terrain"), g.addr["terrain_descent"]))
+
+    # Column by column: the surface tile is where the OFFSET puts it.
+    bad = []
+    for x in range(WORLD_COLS):
+        y = descent[x] - DESCENT_ROW0
+        got = g.tile(x, y) if 0 <= y < VIEW_H else None
+        if got != T_TERRAIN_TOP:
+            bad.append((x, descent[x], y, got))
+    check(not bad,
+          "every column's surface tile is at terrain_descent[col] - %d -- "
+          "col:profile-row:screen-row:found %r" % (DESCENT_ROW0, bad[:5]))
+
+    # ...and the rest of the window is sky above it and body below it, so a
+    # blit that painted the surface and left the buffer alone fails too.
+    bad = []
+    for x in range(WORLD_COLS):
+        for y in range(HUD_H, VIEW_H):
+            wr = DESCENT_ROW0 + y
+            want = (T_BLANK if wr < descent[x] else
+                    T_TERRAIN_TOP if wr == descent[x] else T_TERRAIN)
+            if g.tile(x, y) != want:
+                bad.append((x, y, want, g.tile(x, y)))
+    check(not bad,
+          "the whole window is sky/surface/body exactly as the profile and the "
+          "offset say -- col:row:want:found %r" % (bad[:5]))
+
+    # The offset is not decoration: at row 0 the descent shows no ground at all.
+    off0 = [x for x in range(WORLD_COLS) if 0 <= descent[x] < VIEW_H]
+    check(DESCENT_ROW0 > 0 and not off0,
+          "and it is the offset that shows it -- at row 0 the descent's surface "
+          "would be off the bottom of the screen in all %d columns (%d would "
+          "show it), so a blit that ignored %d would draw %d rows of sky"
+          % (WORLD_COLS, len(off0), DESCENT_ROW0, VIEW_H))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
-          ("p7_sound", p7_sound)]
+          ("p7_sound", p7_sound), ("p9_window", p9_window)]
 
 
 def main(rom, mapfile, only=None):

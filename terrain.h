@@ -4,28 +4,54 @@
 
 #include <stdint.h>
 
-/* Mode LANDER's world: 160 px / 8 px per tile.  NOT a power of two, so the
- * wrap is two compares (x < 0 -> x += 160; x >= 160 -> x -= 160) and never
- * an `& WORLD_MASK`: masking would wrap at 256 and put the seam off-screen. */
+/* Both worlds are 160 px / 8 px per tile WIDE, and neither is one screen
+ * wide plus a bit: 160 is NOT a power of two, so the wrap is two compares
+ * (x < 0 -> x += 160; x >= 160 -> x -= 160) and never an `& WORLD_MASK`:
+ * masking would wrap at 256 and put the seam off-screen. */
 #define WORLD_COLS 20
 
 /* The ceiling on a surface row, in 8 px TILE units -- the unit mkgfx.py
  * draws the terrain tiles in.  NOT pixels, and NOT the screen: mode 1 only
- * reaches row 12, but M2's DESCENT puts the surface ~100 tiles down and the
- * type has to hold that without a refactor. */
+ * reaches row 12, the DESCENT profile reaches row 100, and the type has to
+ * hold both without a refactor. */
 #define TERRAIN_MAX_TILES 255
 
-/* Surface row (tile units) at each world tile column.  Periodic in
- * WORLD_COLS: a ripple of period 4 inside a swell of period 20, both
- * dividing 20, so the wrap seam is invisible. */
-static const uint8_t terrain[WORLD_COLS] = {
+/* LANDER's surface row (tile units) at each world tile column.  Periodic
+ * in WORLD_COLS: a ripple of period 4 inside a swell of period 20,
+ * both dividing 20, so the wrap seam is invisible.  Rows 9..12.
+ * One screen tall -- the world IS the screen, so main.c windows it
+ * at row 0 and the offset arithmetic is the identity there. */
+static const uint8_t terrain_lander[WORLD_COLS] = {
       9,  10,  10,   9,  12,  12,  12,  12,  11,  12,
      12,  11,  10,   9,   9,  10,   9,  10,  10,   9,
 };
 
+/* DESCENT's surface row (tile units) at each world tile column.  Periodic
+ * in WORLD_COLS: a ripple of period 4 inside a swell of period 20,
+ * both dividing 20, so the wrap seam is invisible.  Rows 96..100.
+ * TALLER THAN A BG MAP (32 rows) and taller than the view (18):
+ * there is no blit that puts these rows on one map, which is why
+ * main.c draws a WINDOW of it rather than the whole profile. */
+static const uint8_t terrain_descent[WORLD_COLS] = {
+     96,  97,  97,  96, 100, 100, 100, 100,  98,  99,
+     99,  98,  97,  97,  97,  97,  96,  97,  97,  96,
+};
+
+/* THE ACTIVE PROFILE, and the one symbol in this header that is not a
+ * constant.  sim.h's ship_step() reads terrain[col] to find the ground
+ * under the ship and tools/probe.py reads terrain out of the linker map, so
+ * the two worlds share THIS name rather than one array being renamed per
+ * mode -- a second name would break the collision call and the probe's
+ * address lookup together, and the mismatch would look like a physics bug.
+ * main.c assigns it; everything else just reads through it. */
+static const uint8_t *terrain = terrain_lander;
+
 /* The flat landing runs.  col0/col1 are inclusive world tile columns; mult
  * is the score multiplier for a landing that stays on the pad.  The span is
- * flat (mklevel.py asserts it), so terrain[col0..col1] is all one row. */
+ * flat (mklevel.py asserts it for BOTH worlds), so terrain[col0..col1] is
+ * all one row -- at a different depth in each: the DESCENT world's pads sit
+ * on its own pad_rows, and sim.h's pad_mult() is a question about columns,
+ * which is why the spans are shared. */
 typedef struct {
     uint8_t col0;
     uint8_t col1;
