@@ -66,7 +66,7 @@ PADS = [
 ]
 
 # ------------------------------------------------------------- starfield ---
-# THE SKY IS NOT EMPTY.  Above each profile's surface, LANDER leaves 9 rows of
+# THE SKY IS NOT EMPTY.  Above each profile's surface, LANDER leaves 12 rows of
 # blank tile and DESCENT about 96 -- and a ship falling through unmarked space
 # has nothing to measure itself against.  On a 160x144 screen the ship is the
 # only thing in the sky that moves, so a descent at a steady pace reads as
@@ -111,9 +111,16 @@ STAR_TILE0 = 3              # T_STAR0
 # `on_screen` is which half of the size assertion applies: LANDER's profile has
 # to fit the 18-row view (the world IS the screen), and DESCENT's has to NOT
 # fit a 32-row map (that is what makes it a descent).  Both are asserted below.
+#
+# LANDER's base was 9 and read as ground sitting too high in the hand -- it left
+# 72 px of air over a 128 px play area, so the ground filled nearly half the
+# field.  Base 12 puts the surface at rows 12..15 and the air at 96 px.  The
+# pads move with it (they are absolute rows, not offsets) and the x1 pad lands
+# on row 15, the last play row above the HUD bar -- row 16 would be under it.
+# probe.py mirrors these rows in PAD_ROW.
 PROFILES = [
-    dict(name="LANDER",  arr="terrain_lander",  base=9,
-         pad_rows={1: 12, 2: 9},   on_screen=True),
+    dict(name="LANDER",  arr="terrain_lander",  base=12,
+         pad_rows={1: 15, 2: 12},  on_screen=True),
     dict(name="DESCENT", arr="terrain_descent", base=96,
          pad_rows={1: 100, 2: 97}, on_screen=False),
 ]

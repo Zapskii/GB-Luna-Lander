@@ -54,11 +54,18 @@ static int16_t fix_step(uint8_t *frac, int16_t v)
  * SDCC turns a power-of-two scale into a shift; any other constant silently
  * pulls in __mulint (~69 bytes) or __divsint (~231 bytes) for one line.
  *
- * 16/256 = 0.0625 px/frame^2 crosses the 144 px screen from rest in ~68 frames
- * (~1.1 s): long enough to react, short enough to read as falling.  This is a
- * CALIBRATION KNOB, not a derived value -- P5 owns the feel and is expected to
- * move it, so nothing below may assume this particular number. */
-#define GRAV 16
+ * 8/256 = 0.03125 px/frame^2 crosses the 144 px screen from rest in ~96 frames
+ * (~1.6 s).  It was 16 and read as falling too fast in the hand: halving it is
+ * the only power-of-two step that is not floaty, since 4 is a hover.  This is a
+ * CALIBRATION KNOB, not a derived value -- P5 owns the feel and it has moved
+ * once already, so nothing below may assume this particular number.
+ *
+ * It is HALVED AND THRUST IS NOT, which is a deliberate choice and not an
+ * oversight: THRUST is control authority and the report was about fall rate.
+ * It does mean the brake is now 24/256 net rather than 16/256, so the ship
+ * stops in two thirds of the ticks it used to -- if landings read as too easy
+ * now, THRUST is the other half of this knob and 16 restores the 2:1 ratio. */
+#define GRAV 8
 
 /* ---------------------------------------------------------------- thrust */
 

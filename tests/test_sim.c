@@ -102,6 +102,15 @@ static Ship arriving(int16_t vx, int16_t vy, uint8_t heading)
     return s;
 }
 
+/* THE FREE-FALL EDGE, derived rather than written as a pair of literals.  A
+ * drop of d px from rest arrives at vy = sqrt(2 * GRAV * d * 256) in 8.8 units,
+ * so it touches down inside SAFE_VY_MAX at exactly
+ * d = SAFE_VY_MAX^2 / (2 * GRAV * 256) -- 2 px at GRAV 16, 4 px at GRAV 8.  The
+ * 2/3 literals this replaces would have kept describing the old gravity: they
+ * would have started failing, then been "fixed" by nudging the numbers, and the
+ * case would never have said what it means. */
+#define EDGE_PX (SAFE_VY_MAX * SAFE_VY_MAX / (2 * GRAV * 256))
+
 int main(void)
 {
     check(sizeof(uint8_t) == 1 && sizeof(uint16_t) == 2 &&
@@ -115,20 +124,23 @@ int main(void)
         int16_t moved = 0;
         uint8_t i;
 
-        /* fix_step carries the remainder it is POINTED AT: sixteen ticks of
-         * GRAV (16/256 px each) are exactly one whole pixel, and the byte is
-         * back where it started. */
-        for (i = 0; i < 16; i++)
+        /* fix_step carries the remainder it is POINTED AT: a whole pixel of
+         * GRAV is 256/GRAV ticks (32 at GRAV 8, 16 at GRAV 16), and after
+         * exactly that many the byte is back where it started.  Derived, not
+         * written as 16 -- GRAV is a calibration knob and a literal here would
+         * keep asserting about a gravity the game no longer has. */
+        for (i = 0; i < 256 / GRAV; i++)
             moved += fix_step(&frac, GRAV);
         check(moved == 1 && frac == 0,
-              "sixteen GRAV ticks carry one whole pixel and leave no remainder");
+              "%d GRAV ticks carry one whole pixel and leave no remainder",
+              256 / GRAV);
 
-        /* The same sixteen ticks with the fraction in a LOCAL -- the trap.  A
-         * fresh zero every call means every remainder is discarded, so the
-         * ship does not move at all here.  If this ever stops failing to move,
-         * fix_step has changed what its first argument means. */
+        /* The same ticks with the fraction in a LOCAL -- the trap.  A fresh
+         * zero every call means every remainder is discarded, so the ship does
+         * not move at all here.  If this ever stops failing to move, fix_step
+         * has changed what its first argument means. */
         moved = 0;
-        for (i = 0; i < 16; i++) {
+        for (i = 0; i < 256 / GRAV; i++) {
             uint8_t local = 0;
             moved += fix_step(&local, GRAV);
         }
@@ -459,28 +471,31 @@ int main(void)
               "a gentle contact sets ST_LANDED, rests it ON the surface and "
               "scores the pad's x%d", pads[PAD_HIGH].mult);
 
-        /* Two px of free fall lands and three does not.  The threshold table
-         * above is exact; this is the same edge with the real step bolted on,
-         * so a rule that were right in isolation but wired up wrong still
-         * fails here. */
+        /* A drop of exactly EDGE_PX lands and one px more does not.  The
+         * threshold table above is exact; this is the same edge with the real
+         * step bolted on, so a rule that were right in isolation but wired up
+         * wrong still fails here.  40 ticks is the loop bound and not a
+         * measurement: EDGE_PX px of free fall is spent by tick ~2*sqrt(256*
+         * EDGE_PX/GRAV), about 16 here. */
         s = spawn();
         s.x = gx;
-        s.y = (uint16_t)(ground - SHIP_H - 2);
+        s.y = (uint16_t)(ground - SHIP_H - EDGE_PX);
         for (i = 0; i < 40 && s.state == ST_FLY; i++)
             ship_step(&s, 0);
         check(s.state == ST_LANDED && s.y + SHIP_H == ground,
-              "two px of free fall arrives inside SAFE_VY_MAX and lands "
-              "(state %d, underside %d of %d)", s.state, s.y + SHIP_H, ground);
+              "%d px of free fall arrives inside SAFE_VY_MAX and lands "
+              "(state %d, underside %d of %d)",
+              EDGE_PX, s.state, s.y + SHIP_H, ground);
 
         s = spawn();
         s.x = gx;
-        s.y = (uint16_t)(ground - SHIP_H - 3);
+        s.y = (uint16_t)(ground - SHIP_H - EDGE_PX - 1);
         for (i = 0; i < 40 && s.state == ST_FLY; i++)
             ship_step(&s, 0);
         check(s.state == ST_CRASH && s.verdict == LAND_TOO_FAST && s.mult == 0,
-              "three px of free fall does not -- ST_CRASH, TOO_FAST, nothing "
+              "%d px of free fall does not -- ST_CRASH, TOO_FAST, nothing "
               "scored (state %d, verdict %d, mult %d)",
-              s.state, s.verdict, s.mult);
+              EDGE_PX + 1, s.state, s.verdict, s.mult);
 
         /* And a stopped ship STAYS stopped.  Without the state gate at the top
          * of ship_step, the next tick's gravity would carry it through the

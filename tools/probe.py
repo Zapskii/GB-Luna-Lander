@@ -91,7 +91,7 @@ MIN_STARS = 8
 # which is why the wrap in sim.h is two compares and never an & WORLD_MASK.
 WORLD_COLS = 20
 PAD_COUNT = 2
-PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at,
+PAD_ROW = {1: 15, 2: 12}        # multiplier -> the surface row that pad sits at,
                                 # for the LANDER profile p2_terrain runs against
 
 # P9's number, mirrored for the same reason the tile ids are.  MAP_TILES is one
@@ -194,12 +194,6 @@ SHIP_W = SHIP_H = 8
 # different hands on the stick.
 SPAWN_X, SPAWN_Y = 108, 16
 
-# How long each half of the check may take before it gives up and FAILS.  A
-# stuck ROM has to answer 1, not hang the harness into a timeout, which would
-# answer 2 and look like a broken probe rather than a broken game.
-DROP_LIMIT = 120                # a hard drop lands in about 39 ticks
-DESCENT_LIMIT = 1500            # the scripted descent takes about 300
-
 # The descent speed the soft-landing pilot burns above, in 8.8 px/frame.  Well
 # under sim.h's SAFE_VY_MAX, because a pilot that flew the edge of the
 # threshold would make this check a statement about the pilot and not the game.
@@ -208,8 +202,32 @@ VY_HOLD = 32
 # sim.h's gravity and thrust knobs, mirrored.  P5 retunes the feel and WILL
 # move these; the identities below -- the exact integrals and the exact
 # fuel burn -- are what have to keep holding when it does.
-GRAV = 16
+GRAV = 8
 THRUST = 32
+
+# The pilot's brake rule divides by the NET deceleration, so it is derived here
+# and not written as a literal.  It WAS a literal -- 8192, which is
+# 2 * (THRUST - GRAV) * 256 at the old GRAV 16 -- and halving GRAV left it
+# silently describing a brake the ship no longer has, which shows up as a pilot
+# that brakes too late and a check that fails for a reason that is not the game.
+# The 2 is the integral; the 256 converts the 8.8 velocity to px.
+BRAKE_DIV = 2 * (THRUST - GRAV) * 256
+
+# How long each half of the check may take before it gives up and FAILS.  A
+# stuck ROM has to answer 1, not hang the harness into a timeout, which would
+# answer 2 and look like a broken probe rather than a broken game.
+#
+# A CEILING, and deliberately loose.  The loops below leave on the tick the
+# state changes and a drop still in flight at the end fails the state check under
+# it, so surplus costs ticks and never buys a false pass.  It is scaled by GRAV
+# because the longest journey in this file is p6_hud's: it burns 20 ticks of held
+# thrust BEFORE it lets go, so the ship releases already climbing at
+# (THRUST-GRAV) a tick and coasts to its apex (THRUST-GRAV)*20/GRAV ticks later
+# before it falls the whole way back past the spawn to the ground.
+# The flat 120 that used to sit here was a GRAV-16 measurement of a shorter
+# fall, and it did not survive halving the knob.
+DROP_LIMIT = 200 + 2 * (THRUST - GRAV) * 20 // GRAV
+DESCENT_LIMIT = 1500            # the scripted descent takes about 300
 
 # sim.h's fuel economy, mirrored for the same reason: the tank and the burn
 # rate are P5's knobs, and the check is written as "the tank empties in
@@ -249,8 +267,9 @@ THRUST_SPAN = 8                 # ticks to hold the button in p4_thrust
 # --- P13: the DESCENT suite's own numbers -----------------------------------
 #
 # THE BRAKE-LATE PILOT, and why P5's pilot cannot fly this world.  LANDER's
-# air is 72 px and VY_HOLD (a quarter of SAFE_VY_MAX) walks down it in ~300
-# ticks.  The DESCENT world is 752 px of air over a 600 unit tank: a hold at
+# air is 96 px (12 blank rows above the surface at GRAV 8; it was 72 at GRAV 16)
+# and VY_HOLD (a quarter of SAFE_VY_MAX) walks down it in ~300 ticks.  The
+# DESCENT world is 752 px of air over a 600 unit tank: a hold at
 # 0.125 px/frame needs ~4800 ticks and ~2400 units of fuel, so the slow pilot
 # runs dry two thirds of the way down and free-falls the rest.  The mode's own
 # numbers therefore ask for a DIFFERENT shape -- fall hard, brake late -- and
@@ -258,9 +277,10 @@ THRUST_SPAN = 8                 # ticks to hold the button in p4_thrust
 # for.
 #
 # The rule: burn while the height left is within P13_BRAKE times the distance a
-# full stop would take.  Thrust against gravity is a net 16/256 px/frame^2, so
-# stopping from vy takes vy/16 ticks and covers vy^2/32 in 8.8 units, i.e.
-# vy*vy/8192 px -- which is where the 8192 below comes from.  FOUR, and not one:
+# full stop would take.  Thrust against gravity is a net (THRUST - GRAV)/256
+# px/frame^2, so a full stop from vy covers vy^2 / (2 * (THRUST - GRAV) * 256)
+# px -- which is BRAKE_DIV above, and it is derived rather than written down for
+# the reason given there.  FOUR, and not one:
 # at exactly the stopping distance the pilot arrives at zero, and at four it
 # arrives at about 48/256 px/frame against sim.h's 128 threshold.  A margin is
 # what keeps this a check on the GAME: a pilot tuned to the threshold would be
@@ -999,9 +1019,9 @@ def p5_landing(g):
     want = under[0] if under else 0
 
     # ---- the hard drop: no buttons at all --------------------------------
-    # Gravity from rest arrives at about 620/256 px/frame, nearly five times
-    # SAFE_VY_MAX, so the verdict is TOO_FAST -- not CRASH, which is reserved
-    # for ground that is not a pad at all.
+    # Free fall over the whole of LANDER's air arrives at sqrt(2*GRAV*d*256) in
+    # 8.8 units -- several times SAFE_VY_MAX at either GRAV -- so the verdict is
+    # TOO_FAST, not CRASH, which is reserved for ground that is not a pad.
     ticks = 0
     while g.ship()["state"] == ST_FLY and ticks < DROP_LIMIT:
         g.run(1)
@@ -2239,7 +2259,8 @@ def p13_descent(g):
     while g.ship()["state"] == ST_FLY and ticks < P13_LAND_LIMIT:
         s = g.ship()
         alt = ground_under(descent, s["x"]) - (s["y"] + SHIP_H)
-        burn = s["vy"] > 0 and alt * 8192 <= s["vy"] * s["vy"] * P13_BRAKE
+        burn = (s["vy"] > 0 and
+                alt * BRAKE_DIV <= s["vy"] * s["vy"] * P13_BRAKE)
         g.run(1, "U" if burn else "")
         ticks += 1
         cam, scy = g.u16("cam"), g.p.memory[SCY]

@@ -12,18 +12,18 @@
 
 /* The ceiling on a surface row, in 8 px TILE units -- the unit mkgfx.py
  * draws the terrain tiles in.  NOT pixels, and NOT the screen: mode 1 only
- * reaches row 12, the DESCENT profile reaches row 100, and the type has to
+ * reaches row 15, the DESCENT profile reaches row 100, and the type has to
  * hold both without a refactor. */
 #define TERRAIN_MAX_TILES 255
 
 /* LANDER's surface row (tile units) at each world tile column.  Periodic
  * in WORLD_COLS: a ripple of period 4 inside a swell of period 20,
- * both dividing 20, so the wrap seam is invisible.  Rows 9..12.
+ * both dividing 20, so the wrap seam is invisible.  Rows 12..15.
  * One screen tall -- the world IS the screen, so main.c windows it
  * at row 0 and the offset arithmetic is the identity there. */
 static const uint8_t terrain_lander[WORLD_COLS] = {
-      9,  10,  10,   9,  12,  12,  12,  12,  11,  12,
-     12,  11,  10,   9,   9,  10,   9,  10,  10,   9,
+     12,  13,  13,  12,  15,  15,  15,  15,  14,  15,
+     15,  14,  13,  12,  12,  13,  12,  13,  13,  12,
 };
 
 /* DESCENT's surface row (tile units) at each world tile column.  Periodic

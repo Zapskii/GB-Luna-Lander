@@ -24,8 +24,10 @@ On the title screen, SELECT picks between **LANDER** and **DESCENT**, and START
 plays whichever one the title names. They are the same ship, the same landing
 rule and the same tank; what differs is the world.
 
-- **LANDER** — the short world. One 160-pixel screen, wrapping left to right,
-  with the ground a few pixels below the ship. It is what the game starts on.
+- **LANDER** — the short world. One 160-pixel screen, wrapping left to right.
+  The ground sits low on it and the ship opens with most of a screen of air
+  underneath, so there is something to fall through. It is what the game starts
+  on.
 - **DESCENT** — the tall one. The ship opens at the top, a hundred tile rows
   above the pad, and the view scrolls down after it.
 
