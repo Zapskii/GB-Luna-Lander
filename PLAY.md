@@ -4,7 +4,8 @@ A lunar lander for the Game Boy — bring the ship down on a pad, in one piece,
 without much fuel to spare. Twelve levels to a mode, and a landing takes you to
 the next one.
 
-Load it in an emulator, or flash it to a cartridge, and it runs on an original
+Grab `luna.gb` from the [latest release](https://github.com/Zapskii/GB-Luna-Lander/releases/latest)
+and load it in an emulator, or flash it to a cartridge. It runs on an original
 Game Boy, a Game Boy Color, or any emulator. On the title screen, START begins
 the level the title names.
 

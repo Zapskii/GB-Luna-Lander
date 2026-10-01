@@ -357,4 +357,10 @@ gitignored, and the built `luna.gb` is attached to a
 [GitHub release](https://github.com/Zapskii/GB-Luna-Lander/releases) instead.
 To reproduce a release binary, run `make probe` and then `make clean` and `make`
 (the probe leaves a `-debug` ROM in `luna.gb`, and it is newer than the sources),
-and record the md5 before you upload it.
+and record the md5 before you upload it. Tag the commit, POST the release, then
+attach the ROM to `uploads.github.com/repos/Zapskii/GB-Luna-Lander/releases/<id>/assets?name=luna.gb`
+— that upload is the one call whose response is not always parseable, so trust
+the release listing over its exit code. Finish by downloading the asset
+**unauthenticated** and comparing its md5 to the build: that is what proves what
+a player gets, and it is the only step that would have caught a release
+published without its ROM. v1.0 is the current release.
