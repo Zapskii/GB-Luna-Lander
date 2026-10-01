@@ -77,14 +77,18 @@ PAD_COUNT = 2
 PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at,
                                 # for the LANDER profile p2_terrain runs against
 
-# P9's two numbers, mirrored for the same reason the tile ids are.  MAP_TILES
-# is one BG map (32x32), which is the bound a profile that does not fit has to
-# be blitted around; DESCENT_ROW0 is the profile row main.c's window top edge
-# sits on, and it is nonzero on purpose -- the phase's whole target is that the
-# surface tile lands where the OFFSET puts it, not where the profile's first
-# rows are.
+# P9's number, mirrored for the same reason the tile ids are.  MAP_TILES is one
+# BG map (32x32), which was the bound a profile that did not fit had to be
+# blitted around -- and is, as of P11, the SIZE OF THE RING: the map row a world
+# row goes in is its own index modulo this, which is what lets a 101-row profile
+# live on a 32-row map at all.
+#
+# P9's DESCENT_ROW0 -- the fixed profile row the window's top edge sat on -- is
+# gone with P9's hand-wound window.  The offset is the CAMERA's now, so a mirror
+# of it here would be a second answer to a question the ROM already answers, and
+# the one thing a probe must not do is read its expectations out of the thing it
+# is checking.  It is read from `cam` in the checks that need it.
 MAP_TILES = 32
-DESCENT_ROW0 = 84
 
 # P10's camera, mirrored for the same reason.  VIEW_H_PX is sim.h's SCREEN_H_PX
 # -- the panel is 144 px and it is the number the camera's bottom clamp
@@ -1242,14 +1246,24 @@ def p9_window(g):
 
     Every assertion here is about the OFFSET.  At window row 0 the arithmetic
     is the identity, so a blit that ignored the offset entirely would pass a
-    check written that way; DESCENT_ROW0 is nonzero and every one of the
-    descent's columns has its surface below the bottom of the screen at row 0,
-    which is asserted at the end as the reason the offset has to exist.
+    check written that way; the descent's surface is 96..100 rows down and every
+    column of it is below the bottom of the screen at row 0, which is asserted
+    at the end as the reason the offset has to exist.
+
+    THE OFFSET IS THE CAMERA'S NOW, and it is read out of the ROM rather than
+    mirrored here.  P9 wound it by hand to a constant; P10's camera computes the
+    row and P11 streams the profile through a ring on it, so a mirrored constant
+    would be a second answer to a question the ROM already answers -- and a
+    probe that took its expectations from the thing it is checking could not
+    tell a wrong window from a right one.  The flight to the bottom is what
+    makes the offset nonzero and the surface rows visible: at the top of an
+    800 px world the window is eighteen rows of SKY, and "sky where the profile
+    says sky" is a claim a window that blitted nothing would pass.
     """
     print("P9 window")
     # A symbol this phase introduces being ABSENT is an assertion failure, not
     # a harness error: that is the power gate on the P8 ROM, and it answers 1.
-    if not g.need("terrain", "terrain_lander", "terrain_descent"):
+    if not g.need("terrain", "terrain_lander", "terrain_descent", "cam"):
         return
 
     lander = g.profile("terrain_lander")
@@ -1269,7 +1283,7 @@ def p9_window(g):
     check(g.var("pick") == 1,
           "the title selected the DESCENT half (pick %d)" % g.var("pick"))
     g.run(8, "S")           # START clears the title, hands the field over
-    g.run(2)
+    g.run(4)                # ...and the ring's first fill lands
 
     check(g.u16("terrain") == g.addr["terrain_descent"]
           and g.active_profile() == descent,
@@ -1277,38 +1291,62 @@ def p9_window(g):
           "(terrain -> 0x%04X, terrain_descent at 0x%04X)"
           % (g.u16("terrain"), g.addr["terrain_descent"]))
 
-    # Column by column: the surface tile is where the OFFSET puts it.
+    # Fly it to the ground.  The camera is the offset now and it starts at 0 --
+    # the identity -- so the window only becomes something worth checking once
+    # the descent has wound it down to where the profile's surface can be seen.
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1)
+        ticks += 1
+    g.run(2)
+    top = g.u16("cam") >> 3
+    check(0 < top <= descent[0],
+          "the camera has wound the window %d rows down the DESCENT world, so "
+          "the check below is not the identity it warns about (%d ticks)"
+          % (top, ticks))
+
+    # The map row a world row lives in is its own index modulo the map's height
+    # -- the RING P11 wound the profile onto.  Screen row y shows the world row
+    # `top + y`, and that world row's tile is at map row `(top + y) & 31`, which
+    # is the same as `world_row & 31`: the two agree because both wrap at 32.
+    def slot(wr):
+        return wr & (MAP_TILES - 1)
+
+    # Column by column: the surface tile is where the OFFSET puts it -- on the
+    # screen at row descent[x] - top, and at the ring slot that world row owns.
     bad = []
     for x in range(WORLD_COLS):
-        y = descent[x] - DESCENT_ROW0
-        got = g.tile(x, y) if 0 <= y < VIEW_H else None
+        y = descent[x] - top
+        got = g.tile(x, slot(descent[x])) if 0 <= y < VIEW_H else None
         if got != T_TERRAIN_TOP:
             bad.append((x, descent[x], y, got))
     check(not bad,
           "every column's surface tile is at terrain_descent[col] - %d -- "
-          "col:profile-row:screen-row:found %r" % (DESCENT_ROW0, bad[:5]))
+          "col:profile-row:screen-row:found %r" % (top, bad[:5]))
 
-    # ...and the rest of the window is sky above it and body below it, so a
-    # blit that painted the surface and left the buffer alone fails too.
+    # ...and the rest of the window is sky above it and body below it, so a ring
+    # that painted the surface and left the row alone fails too.
     bad = []
     for x in range(WORLD_COLS):
         for y in range(HUD_H, VIEW_H):
-            wr = DESCENT_ROW0 + y
+            wr = top + y
             want = (T_BLANK if wr < descent[x] else
                     T_TERRAIN_TOP if wr == descent[x] else T_TERRAIN)
-            if g.tile(x, y) != want:
-                bad.append((x, y, want, g.tile(x, y)))
+            got = g.tile(x, slot(wr))
+            if got != want:
+                bad.append((x, y, wr, want, got))
     check(not bad,
           "the whole window is sky/surface/body exactly as the profile and the "
-          "offset say -- col:row:want:found %r" % (bad[:5]))
+          "offset say -- col:row:world-row:want:found %r" % (bad[:5]))
 
-    # The offset is not decoration: at row 0 the descent shows no ground at all.
+    # The offset is not decoration: at the top of the world the descent shows no
+    # ground at all, which is what a life that opens there would be looking at.
     off0 = [x for x in range(WORLD_COLS) if 0 <= descent[x] < VIEW_H]
-    check(DESCENT_ROW0 > 0 and not off0,
+    check(top > 0 and not off0,
           "and it is the offset that shows it -- at row 0 the descent's surface "
           "would be off the bottom of the screen in all %d columns (%d would "
-          "show it), so a blit that ignored %d would draw %d rows of sky"
-          % (WORLD_COLS, len(off0), DESCENT_ROW0, VIEW_H))
+          "show it), so a window that opened there would draw %d rows of sky"
+          % (WORLD_COLS, len(off0), VIEW_H))
 
 
 # ----------------------------------------------------------------- P10 -----
@@ -1502,11 +1540,204 @@ def p10_camera(g):
           % (CAM_ANCHOR, seen, bad[:4]))
 
 
+# ----------------------------------------------------------------- P11 -----
+def p11_stream(g):
+    """The map is a RING over the world: after any number of scrolled rows,
+    every visible row is the profile row the CAMERA says belongs there.
+
+    A ring is the one thing a tilemap read cannot be casual about.  The same map
+    slot is right for one world row and wrong for another, and a stale row, a
+    repeated row and a row from the wrong part of the world are all just tiles
+    in a tilemap -- none of them is a screenshot, and none of them fails a check
+    that only looks at one screen.  So every assertion below is the tile at the
+    map slot the WORLD ROW owns, against the profile's own bytes, and the flight
+    is long enough to cross the map's whole height (256 px) so that a modulus
+    that is merely wrong -- one that scrolls correctly for a map and then
+    repeats -- is caught rather than exercised.  The last third does the other
+    half: it walks the camera back UP, which is the only thing that can show
+    whether the ring gives back the rows the HUD covered.
+    """
+    print("P11 stream")
+    # A symbol this phase introduces being ABSENT is an assertion failure, not a
+    # harness error: that is the power gate on the P10 ROM, and it answers 1.
+    # The descent below runs either way -- an older ROM has every OTHER symbol
+    # this reads and fails on the CONTENT, where the whole band past the 18 rows
+    # P9 blitted is blank -- so the gate holds on the behaviour as well as on
+    # the name.
+    have = g.need("terrain", "terrain_descent", "ship", "cam", "ring_top")
+
+    def settled(cam, scy):
+        """Is this sample past the tick's writes, so that the camera and the map
+        are the same picture?
+
+        `ring_top` is written BY the row write and by nothing else, so it is the
+        exact test -- and on a ROM that has no ring (the power gate's, where the
+        symbol is not in the map at all) there is nothing to compare and the
+        scroll register is the next best thing: SCY is written in the same
+        vblank as the map, so it is level with it whether or not the camera is.
+        Reaching for a missing symbol would RAISE, and a harness error exits 2 --
+        which is not what a power gate is allowed to answer."""
+        if have:
+            return g.var("ring_top") == cam >> 3
+        return scy == (cam & 0xFF)
+
+    g.run(150)
+    g.run(4, "T")           # SELECT: the title's DESCENT half (an EDGE)
+    g.run(2)                # button-free: the next press is an EDGE
+    g.run(8, "S")           # START: the tall world, from the top of it
+    g.run(4)                # ...and the ring's first fill, 32 rows of map
+
+    descent = g.profile("terrain_descent")
+
+    def band_bad(cam):
+        """Every tile of the visible window against the world row the camera
+        puts at that screen row, or [] if they all agree.
+
+        BOTH halves come from `cam` and not from SCY, deliberately.  They are
+        one picture -- SCY says which map rows are on the screen and the camera
+        says which world rows those are -- but they are two registers written in
+        one vblank, and this file samples the emulator between frames, so a
+        sample can land on either side of that pair.  The pairing is checked
+        separately below; what is checked HERE is the ring, and it is checked
+        against the thing that wrote it.
+
+        Rows HUD_H.. are the window minus the HUD's own two rows, which are
+        telemetry and not terrain and are checked by p6_hud."""
+        top = cam >> 3
+        out = []
+        for r in range(HUD_H, VIEW_H):
+            wr = top + r
+            mr = wr & (MAP_TILES - 1)
+            for c in range(WORLD_COLS):
+                want = (T_BLANK if wr < descent[c] else
+                        T_TERRAIN_TOP if wr == descent[c] else T_TERRAIN)
+                got = g.tile(c, mr)
+                if got != want:
+                    out.append((c, r, wr, mr, want, got))
+        return out
+
+    # ---- the descent, sampled every tick ---------------------------------
+    # THE BAND IS READ AT THE SAMPLE, not off a list of cameras afterwards.
+    # The map is a ring, so a camera remembered from tick 40 says nothing about
+    # the tiles that are up at tick 200 -- it says which world rows WOULD be
+    # there if nothing had moved, and every one of them is a tile from the right
+    # profile.  That is the shape of bug this phase is about, so the tilemap is
+    # read on the same tick the camera is.
+    #
+    # THE BAND IS READ ONLY WHERE THE TICK'S TWO HALVES AGREE, and that is the
+    # whole of the slack in this check.  A tick computes `cam` in its body and
+    # writes SCY and the ring from it in the vblank after, so a sample can land
+    # between those two -- and then the camera is this tick's while the map is
+    # the last tick's, which is one row of difference and looks exactly like the
+    # stale row this phase is about.  `ring_top` is the test for "these are one
+    # picture": it is written BY the row write and by nothing else, so it is
+    # level with the camera on every tick whose vblank the sample is past, and
+    # a row behind it on the ticks the sample is not.  Where it holds, the
+    # comparison below is exact -- no slack row, which is what matters, because
+    # a slack row is precisely wide enough to hide the bug.
+    samples = []
+    band_fails = []
+    checked = 0
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1)
+        ticks += 1
+        cam, scy = g.u16("cam"), g.p.memory[SCY]
+        samples.append((cam, scy))
+        if ticks % 4 or not settled(cam, scy):
+            continue
+        checked += 1
+        b = band_bad(cam)
+        if b:
+            band_fails.append((cam, scy, b[:2]))
+    check(len(samples) > 8 and g.ship()["state"] != ST_FLY,
+          "the scripted descent reached the ground in %d ticks (%d samples)"
+          % (ticks, len(samples)))
+
+    # ...and the scroll register is the camera's low byte.  One tick of slack,
+    # and no more: `cam` and SCY are two separate reads of the emulator's memory
+    # and a sample can land between the tick that computed one and the vblank
+    # that wrote the other, so the accepted answer is this tick's camera or the
+    # last one's.  The slack is in the PHASE and never in the value -- a camera
+    # kept in a byte, clamped at 256 px the way the map's own size would clamp
+    # it, is 400 px out at the bottom of this world and fails on every sample.
+    bad = []
+    for k, (_c, s) in enumerate(samples):
+        c0 = samples[k - 1][0] if k else _c
+        if s not in (c0 & 0xFF, _c & 0xFF):
+            bad.append((_c, s))
+    check(not bad,
+          "and SCY is the camera's own low byte on every sampled tick ("
+          "cam:scy mismatches %r)" % (bad[:4],))
+
+    check(checked >= 20 and not band_fails,
+          "every visible row is the profile row the camera says belongs there, "
+          "all the way down -- %d sampled bands, col:row:world-row:map-row:"
+          "want:found %r" % (checked, band_fails[:3]))
+
+    # ---- past a whole map -------------------------------------------------
+    # The map is 32 rows and the world is 101, so the camera's own row crosses
+    # the ring's entire height twice.  THAT is what makes the modulus a claim:
+    # a band written at `wr & 15`, or at a base that does not follow the camera,
+    # is right for the first 256 px of the descent and then repeats a stretch of
+    # the world it has already gone past -- and every row of it is still a tile
+    # from the right profile, so nothing but this number says it happened.
+    tops = [c >> 3 for (c, _s) in samples]
+    check(min(tops) == 0 and max(tops) - min(tops) >= MAP_TILES,
+          "and the flight crossed the map's whole height -- the camera's row "
+          "ran %d -> %d, %d rows of it against a %d-row map, so the wrap is "
+          "crossed and not merely reached"
+          % (min(tops), max(tops), max(tops) - min(tops), MAP_TILES))
+
+    # ---- and back UP, where a stale row would hide ------------------------
+    # The HUD is two rows of MAP, so the two map rows the camera is sitting on
+    # hold telemetry and not terrain; walking back UP the world drags those rows
+    # down out of the strip and into the terrain, where they have to be the
+    # profile again.  It is the same one-tick, one-row class of bug the phase
+    # exists to avoid and it has exactly one symptom -- a stale row that tracks
+    # the camera -- so the climb is flown and the band is read on the way.
+    #
+    # Fall first, then burn: a ship that opens at the top of the world has
+    # nothing above it to climb back to, so the camera can only be made to walk
+    # backwards from partway down.  y = 300 puts it well clear of the ground at
+    # 768 and the tank covers the reversal with room to spare.
+    g.run(8, "S")                       # a fresh life, back at the top
+    g.run(8)                            # ...and the ring rebuilt under it
+    ticks = 0
+    while g.ship()["y"] < 300 and ticks < DESCENT_LIMIT:
+        g.run(1)
+        ticks += 1
+    top_max = g.u16("cam") >> 3
+    bad = []
+    checked = 0
+    climbed = 0
+    for k in range(DESCENT_LIMIT):
+        g.run(1, "U")
+        if g.ship()["state"] != ST_FLY:
+            break
+        top = g.u16("cam") >> 3
+        if top > top_max:
+            top_max = top
+        climbed = top_max - top
+        if climbed and settled(g.u16("cam"), g.p.memory[SCY]):
+            checked += 1                       # the same agreement gate as above
+            b = band_bad(top << 3)
+            if b:
+                bad.append((g.u16("cam"), b[:2]))
+        if climbed >= 5:
+            break
+    check(climbed >= 5 and checked >= 8 and not bad,
+          "and a ship that thrusts back UP the world is followed -- the camera "
+          "walked %d rows backwards over %d sampled bands, and every visible "
+          "row was the profile's again (col:row:world-row:map-row:want:found "
+          "%r)" % (climbed, checked, bad[:3]))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
           ("p7_sound", p7_sound), ("p9_window", p9_window),
-          ("p10_camera", p10_camera)]
+          ("p10_camera", p10_camera), ("p11_stream", p11_stream)]
 
 
 def main(rom, mapfile, only=None):

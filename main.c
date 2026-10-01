@@ -65,6 +65,30 @@
  * ground while every frame still looks like a working camera.  LANDER is
  * untouched by either: its world is 104 px, shorter than the screen, so its
  * camera is pinned at 0 and its view is exactly what P9 drew.
+ *
+ * P11 is the RING.  P10's camera says which world row the top of the screen
+ * shows and SCY really does scroll, but the BG map is 32 rows -- 256 px --
+ * against a DESCENT world of 808, so the tiles under the scroll are the ones
+ * P9 parked there and everything past the 18th row is blank.  What the map
+ * becomes is a RING over the world: map row (world_row & 31) holds that world
+ * row, and the row the camera has just uncovered is written into the slot the
+ * row 32 rows above it vacated, one row per vblank.  That is what makes a 101-row
+ * world fit a 32-row map, and it is why the modulus is the whole of the phase:
+ * a ring written with the wrong one -- or with a base that does not stay level
+ * with the camera -- scrolls perfectly for 256 px and then repeats, which
+ * reads as a scrolling bug and is not one.
+ *
+ * TWO THINGS FALL OUT OF IT.  The first is the HUD: it is two rows of BG MAP,
+ * so the two map rows the camera sits on hold telemetry and not terrain, and
+ * they have to be written at the rows the CAMERA puts them on rather than at
+ * rows 0 and 1 -- a HUD nailed to rows 0 and 1 is right for one scroll
+ * position and then tracks the camera up the screen and wraps.  The second is
+ * that the ring owes those two rows back: walking back UP the world drags the
+ * covered rows down into the terrain, so the row leaving the strip is redrawn
+ * -- see ring_stream().  And DESCENT no longer opens on P9's hand-wound row
+ * 84: a life opens at the top of a world it has to fall through, which is what
+ * a descent is, and the streaming is what puts the ground under it on the way
+ * down.
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -86,6 +110,19 @@ typedef char ship_frames_fit[(ROT_STEPS <= GFX_SPRITE_COUNT) ? 1 : -1];
 #define VIEW_W 20
 #define VIEW_H 18
 
+/* The BG map is 32 rows of 32 tiles, and it is the RING the tall world is
+ * wound through: 32 rows is 256 px of scroll against a DESCENT world of 808,
+ * so the row a world row belongs in is its own index modulo this.  A power of
+ * two, so the modulus is an AND -- and the ONLY modulus in the project that is
+ * allowed to be one, because here it is the map's size and not the world's
+ * (sim.h's world wrap is two compares for exactly that reason). */
+#define MAP_ROWS 32
+
+/* The HUD strip: the rows at the top of the screen the telemetry owns, and so
+ * the rows of the map that hold text instead of terrain.  The ring has to know
+ * how many they are -- see the climb case in ring_stream(). */
+#define HUD_ROWS 2
+
 /* sim.h has its own copy of the screen height -- it carries the camera and has
  * no gb/gb.h to ask -- and this is the line that keeps the two in step.  A
  * mismatch moves the camera's bottom clamp off the world's end while the scroll
@@ -93,18 +130,13 @@ typedef char ship_frames_fit[(ROT_STEPS <= GFX_SPRITE_COUNT) ? 1 : -1];
  * error catches. */
 typedef char screen_h_matches[(VIEW_H * 8 == SCREEN_H_PX) ? 1 : -1];
 
-/* The DESCENT world's opening screen: the profile row the TOP of the screen
- * sits on, i.e. how far down the world the window has been wound.
- *
- * A fixed constant and not a camera -- P9 draws the descent's opening screen
- * and nothing else, so there is no offset variable, no scroll and no streaming.
- * It is NONZERO on purpose: the window arithmetic is the one genuinely new
- * piece of rendering this phase adds, and at row 0 it would be the identity
- * and prove nothing.  The DESCENT profile's surface is at rows 96..100, so a
- * window at 84 puts the ground in the lower third with sky above it -- which
- * is what an opening screen of a DESCENT is.  At row 0 every column of it
- * would be empty sky. */
-#define DESCENT_ROW0 84
+/* P9 wound the DESCENT's opening screen to a fixed profile row BY HAND, because
+ * there was no camera to wind it for it.  P10's camera answers that question
+ * instead -- the window's top row IS the camera's row -- and P11 is what makes
+ * the map agree with it, so the constant is gone rather than kept as a second
+ * answer to a question the camera already answers.  A DESCENT life opens at the
+ * top of its world now, with the ground 96 rows below it, which is what a
+ * descent looks like before any of it has been flown. */
 
 /* Which screen this iteration builds.  ST_TITLE and ST_PLAY are this file's;
  * the other two states the game has are sim.h's ST_CRASH and ST_LANDED, and
@@ -239,6 +271,44 @@ static uint16_t cam;
  * the title's frames are at SCY 0 by the same rule as everything else. */
 static uint16_t world_h;
 
+/* One world row of terrain, staged for the map write in ring_stream().
+ *
+ * TWENTY BYTES AND NOT A ROW OF `bg`.  The HUD's two rows live in bg[0..39] and
+ * are sent from there in the same vblank, so a row_blit() that staged into bg
+ * would destroy the HUD's first row on the way past -- and the ordering that
+ * would fix that (HUD first, rows after) is the one that lets the ring's own
+ * write at the top of the screen land ON the HUD.  A separate 20 bytes makes
+ * the two writes independent, which is the only reason it is here.
+ *
+ * A file-scope static rather than a local of ring_stream()'s for the usual
+ * reason in this file: it has to survive the call, and luna.map is where the
+ * probe reads main.c's storage. */
+static uint8_t rowbuf[VIEW_W];
+
+/* The RING's base: the world row the map's row 0 holds.  Every map row m holds
+ * world row ring_top + m, and the camera's own row is what it tracks -- so the
+ * two are equal except for the ticks between the camera moving and the row
+ * being written, which is exactly the slack the map's 32 rows give over the
+ * screen's 18.
+ *
+ * A uint8_t, and it has to hold 101: the DESCENT world's rows run to 100, which
+ * is the same reason terrain.h's heights are TERRAIN_MAX_TILES wide and why a
+ * byte counted in PIXELS would have to be the wrong type again.
+ *
+ * A file-scope static so probe.p11_stream can read it out of luna.map. */
+static uint8_t ring_top;
+
+/* Set when the ring describes a different part of the world than the camera
+ * does, and cleared by the fill that fixes it.  A new LIFE is the only thing
+ * that sets it: the camera opens at the top of the world, and a life that ended
+ * at the bottom leaves the ring wound eighty rows down, which is more than the
+ * 32 rows the map holds and so cannot be walked back a row at a time.
+ *
+ * Cleared AFTER the fill rather than before, so the flag is a claim about the
+ * map and not about the code: a probe that reads it set knows the band it is
+ * looking at is mid-rebuild. */
+static uint8_t ring_stale;
+
 /* The ship.  THE FRACTION BYTES (xf/yf) LIVE IN HERE AND NOT IN ship_step()'s
  * locals: fix_step() carries the sub-pixel remainder between ticks, and a
  * local would reset it every tick, quantising the motion to whole pixels.  The
@@ -284,6 +354,15 @@ static void ship_init(void)
      * state byte is what says whether this means anything. */
     ship.verdict = LAND_SAFE;
     ship.mult = 0;
+
+    /* ...and the ring, which a new life invalidates and nothing else does.  The
+     * spawn is at the TOP of the world, so the camera is about to be at row 0 --
+     * and the ring is wherever the LAST life left it, up to eighty rows down,
+     * which is more than the 32 rows the map has and so is not something the
+     * one-row-at-a-time path can walk back.  Set here rather than in the tick
+     * loop because "a life starts" is the whole of the condition, and this is
+     * the one function that means that. */
+    ring_stale = 1;
 }
 
 /* ------------------------------------------------------------------ text */
@@ -481,52 +560,126 @@ static void build_hud(void)
     }
 }
 
-/* The visible rows of the ACTIVE profile -- a WINDOW on it, not its first rows.
+/* ONE world row of the ACTIVE profile, into the map slot that row OWNS.
  *
- * world_row0 is the profile row the top of the screen sits on: screen row r is
- * world row world_row0 + r.  Every cell is written -- sky above the surface,
- * the surface tile on it, body below -- so this fills the whole buffer and
- * there is no bg_clear() to forget.
+ * P9's blit_window() did the whole visible window at once and P11 replaced it
+ * with this, because the ring cannot write a window: the row a world row goes
+ * in depends only on the world row, and the map is a ring over the world rather
+ * than a window on it.  Filling the window is now MAP_ROWS calls to this, which
+ * is what ring_fill() is.
+ *
+ * Every cell is written -- sky above the surface, the surface tile on it, body
+ * below -- so a row is never left holding the row that was there 32 rows ago.
  *
  * terrain[col] is a TILE row, not a pixel row -- the 8 px tile mkgfx.py draws
  * the art in -- so there is no `<< 3` anywhere here.  A `<< 3` is the classic
  * "heights are pixels" slip and it would drop the ground eight rows and push
  * the bottom of it off the screen, which still LOOKS like terrain.
  *
- * THIS is what makes a profile deeper than the BG map drawable at all.  One map
- * is 32x32 tiles, so a profile that reaches row 100 has rows with nowhere to
- * go: a blit that tried to write them would be TRUNCATED at row 31 by the map
- * and say nothing about it, and the old per-column fill simply had no tile to
- * put on screen below the view.  terrain.h asserts the DESCENT profile is
- * taller than a map (MAP_TILES) for exactly that reason.
- *
- * There is still no camera: world COLUMN N is screen column N.  Only the rows
- * are windowed, and P9 winds that offset once, here.
- *
- * The buffer is walked with an index that INCREMENTS rather than one recomputed
- * per cell: VIEW_W is 20, which is not a power of two, and `r * VIEW_W` inside
- * this loop is a multiply per tile.  A stride this file cannot shift is a
- * stride to add, not to multiply by. */
-static void blit_window(uint8_t world_row0)
+ * World COLUMN N is screen column N: there is still no horizontal camera, and
+ * the world wraps in 160 px at the same seam it always did.  Only the ROWS are
+ * wound through the map. */
+static void row_blit(uint8_t wr)
 {
-    uint8_t col, r;
-    uint16_t i = 0;
+    uint8_t col;
 
-    for (r = 0; r < VIEW_H; r++) {
-        uint8_t wr = (uint8_t)(world_row0 + r);
+    for (col = 0; col < WORLD_COLS; col++) {
+        uint8_t surface = terrain[col];     /* surface row, tile units */
 
-        for (col = 0; col < WORLD_COLS; col++) {
-            uint8_t top = terrain[col];     /* surface row, tile units */
+        rowbuf[col] = (wr < surface) ? T_BLANK
+                    : (wr == surface) ? T_TERRAIN_TOP : T_TERRAIN;
+    }
 
-            bg[i++] = (wr < top) ? T_BLANK
-                    : (wr == top) ? T_TERRAIN_TOP : T_TERRAIN;
-        }
+    /* `wr & (MAP_ROWS - 1)` and NOT a plain `wr`: the world is 101 rows and the
+     * map is 32, so the row a world row goes in is its own index taken modulo
+     * the map -- which is what makes the map a ring rather than a window, and
+     * what makes the scroll seamless past 256 px instead of repeating.  An AND
+     * and not a `%`, because MAP_ROWS is a power of two and SDCC turns the
+     * modulo into a call to __divuint (231 bytes) for a wrap that costs one
+     * instruction.  `MAP_ROWS - 1` rather than a literal 31, so the day the map
+     * is not 32 rows this line is still the right one. */
+    set_bkg_tiles(0, (uint8_t)(wr & (MAP_ROWS - 1)), VIEW_W, 1, rowbuf);
+}
+
+/* The ring, filled whole: the 32 world rows from `top` down, one map row each,
+ * which is the state streaming then keeps by writing one row a tick.
+ *
+ * THE WHOLE 32 AND NOT JUST THE 18 THE SCREEN SHOWS, because the map is a ring
+ * and the screen is a window on it: a band of only 18 rows would leave the
+ * slots the camera is about to uncover holding whatever the last 256 px left
+ * there, and the row that is 14 rows below the screen is written now precisely
+ * so that it is already right when the camera arrives.
+ *
+ * 32 map writes and not one 20x32 blit, because the map's rows are the ring's
+ * and the band can start at any of the 32 of them: a single rectangular write
+ * would have to be two, wrapping at the map's end, and it would need a 640-byte
+ * staging buffer to hold a band this file otherwise only ever holds a row of.
+ * A row at a time costs nothing here -- this runs once per LIFE, not per tick. */
+static void ring_fill(uint8_t top)
+{
+    uint8_t m;
+
+    for (m = 0; m < MAP_ROWS; m++)
+        row_blit((uint8_t)(top + m));
+    ring_top = top;
+}
+
+/* One tick of the ring, in the vblank with the SCY write above it.
+ *
+ * The band that is live is [ring_top, ring_top + MAP_ROWS - 1] and the window
+ * is [cam_row, cam_row + VIEW_H - 1], so the two are one row apart in the
+ * steady state and the camera reveals exactly one row a tick.  What is written
+ * is the row at the far END of the band -- 31 rows below the top of the screen
+ * -- and not the row at the bottom of the screen, which was written 14 ticks
+ * ago: that is the slack the ring's 32 rows buy over the screen's 18, and it is
+ * what makes the reveal land a frame and a half before it is ever looked at.
+ *
+ * Writing ONE ROW PER VBLANK is the whole point of the phase.  A blit of the
+ * window would have to run with the display off to fit, and a visible blank
+ * band -- or a flash -- per row is the failure this exists to avoid: twenty
+ * tiles plus the HUD's two rows and the SCY write fit one blanking window,
+ * which is why the reveal is a row and never a frame of nothing.
+ *
+ * (What the whole TICK costs is another question and a P9 one: the descent does
+ * not complete one tick per emulated frame and did not before this phase --
+ * probe.p10_camera says so where it has to allow for it.)
+ *
+ * THE CLIMB CASE WRITES A SECOND ROW, and it is not decoration.  The HUD is two
+ * rows of MAP -- the ring's own slots for the two world rows the camera is
+ * sitting on hold telemetry, not terrain -- so walking back UP the world drags
+ * a covered slot down out of the strip and into the terrain at screen row
+ * HUD_ROWS.  Exactly one row leaves the strip per row the camera climbs, so
+ * re-drawing exactly that row keeps pace, and the hole is the one this phase's
+ * trap describes: a single stale row that tracks the camera, which reads as a
+ * scrolling bug and is an ordering one.  LANDER cannot reach it (its camera is
+ * pinned at 0) and a DESCENT life cannot either (it opens at the top), but a
+ * ship that thrusts back UP out of a fall is an ordinary thing to do. */
+static void ring_stream(void)
+{
+    uint8_t top = (uint8_t)(cam >> 3);
+
+    /* ring_top MOVES AFTER the write and not before, so that it always means
+     * "the band as it stands in the map" rather than "the band this tick is
+     * aiming at".  The difference only shows to a reader sampling between the
+     * two -- a row write costs a blanking window, so there is a whole frame in
+     * which the band is half moved -- and it is what lets probe.p11_stream use
+     * this byte as its gate: on any tick that is past the writes the two agree
+     * and the tiles below are exact, and on a tick that is not, they disagree
+     * and the sample is skipped rather than graded against a band that is
+     * mid-flight. */
+    while (ring_top < top) {
+        row_blit((uint8_t)(ring_top + MAP_ROWS));   /* the row the band gains */
+        ring_top++;
+    }
+    while (ring_top > top) {
+        row_blit((uint8_t)(ring_top - 1));          /* ...and climbing */
+        row_blit((uint8_t)(ring_top + HUD_ROWS - 1));
+        ring_top--;
     }
 }
 
-/* Which world the play field opens on, and the profile row its top edge sits
- * on.  It returns the window offset so the ONE call to blit_window() below
- * takes it directly, and it is the ONLY place `terrain` is ever assigned.
+/* Which world the play field opens on.  It is the ONLY place `terrain` is ever
+ * assigned.
  *
  * `terrain` is ONE symbol.  sim.h's ship_step() reads terrain[col] to find the
  * ground and tools/probe.py reads it out of the linker map, so the two profiles
@@ -536,22 +689,23 @@ static void blit_window(uint8_t world_row0)
  * the ship would land in the other, and that reads as a physics bug.
  *
  * LANDER is the world it has always been -- 160 px wide and one screen tall --
- * so its window starts at row 0 and the offset arithmetic is the identity
- * there.  That is deliberate: it is what keeps this phase's rendering identical
- * to P6's, so P2's and P5's checks are still checks on the game and not on a
- * rewrite.  DESCENT is deeper than a BG map, so it opens partway down.
+ * and its camera is pinned at 0, so its ring sits at row 0 and the whole of
+ * P11's machinery is the identity there.  That is deliberate: it is what keeps
+ * the rendered screen identical to P6's, so P2's and P5's checks are still
+ * checks on the game and not on a rewrite.  DESCENT is deeper than a BG map, so
+ * it is the one the ring exists for.
  *
- * M2 is where the descent becomes a game.  P9 draws its opening screen and
- * nothing else: no scroll, no streaming, and no spawn or physics that knows the
+ * It no longer returns a window offset, because there is no longer one place to
+ * put it: P9 could blit the descent's opening screen at a hand-picked row and
+ * say so once, and the camera means the offset is a different number every tick
+ * -- so the row is the camera's business now and not this function's.
+ *
+ * M2 is where the descent becomes a game.  What it has as of P11 is the world,
+ * the camera and the tiles under both: no spawn and no physics that knows the
  * mode. */
-static uint8_t field_open(void)
+static void field_open(void)
 {
-    if (pick == MODE_DESCENT) {
-        terrain = terrain_descent;
-        return DESCENT_ROW0;
-    }
-    terrain = terrain_lander;
-    return 0;
+    terrain = (pick == MODE_DESCENT) ? terrain_descent : terrain_lander;
 }
 
 /* How tall the ACTIVE world is, in px: the bottom of the deepest column, one
@@ -579,11 +733,17 @@ static uint16_t world_extent(void)
     return (uint16_t)(((uint16_t)deepest + 1) << 3);
 }
 
-/* The play field's STATIC half, built once when the title is cleared and
- * blitted whole -- see the write below -- because this is the half of the
- * screen that does not move.  world_h is taken here, with the profile it
- * describes, so the camera's bound and the tiles on the map can never be about
- * two different worlds. */
+/* The play field, opened: which profile is live, and how tall it is.
+ *
+ * It no longer fills anything.  P9 built the whole screen here and blitted it
+ * in one write, because the screen was one fixed window; what the map holds now
+ * is a ring around the CAMERA, and the camera is not a thing this function
+ * knows -- ship_init() marks the ring stale and the play branch fills it from
+ * the camera it has just computed, so there is still exactly one place a band
+ * is written from and it is not here.
+ *
+ * world_h is taken with the profile it describes, so the camera's bound and the
+ * tiles on the map can never be about two different worlds. */
 static void build_field(void)
 {
     /* field_open() FIRST, and not on style: it is what assigns `terrain`, and
@@ -592,10 +752,8 @@ static void build_field(void)
      * would be drawn with the camera clamped to a 104 px world and the view
      * would never move, which looks exactly like a camera that was never wired
      * up. */
-    uint8_t row0 = field_open();
-
+    field_open();
     world_h = world_extent();
-    blit_window(row0);
 }
 
 /* The title: the name, the mode it is offering, and how to start.
@@ -763,13 +921,12 @@ void main(void)
              * later. */
             if (pressed & J_START) {
                 game = ST_PLAY;
-                /* The field, written whole and ONCE: it does not move, and this
-                 * is the only tick it has to reach the PPU on.  The buffer is
-                 * built here and the map write happens after it, so the
-                 * hand-over frame shows the field with the HUD already on it
-                 * rather than a frame of bare terrain. */
+                /* Which world, and how tall.  There is no map write here any
+                 * more: the tiles are a ring around the CAMERA as of P11, and
+                 * the camera is computed from the ship the play branch below is
+                 * about to spawn -- so the fill happens there, on this same
+                 * tick, from the camera rather than from a row picked here. */
                 build_field();
-                set_bkg_tiles(0, 0, VIEW_W, VIEW_H, bg);
             }
         }
 
@@ -803,6 +960,36 @@ void main(void)
              * the loop at one iteration per ~16.7 ms frame. */
             ship_step(&ship, input);
 
+            /* The camera for THIS tick, from the ship the step above just
+             * moved.  A pure function of the state and the world, recomputed
+             * rather than accumulated, so nothing here can drift, a restart
+             * cannot leave the view wound down the world, and there is no
+             * smoothing constant to tune.  cam is what ship_draw() subtracts
+             * and what the tick loop below hands SCY.
+             *
+             * IMMEDIATELY after the step, and not down with the other drawing,
+             * and that is a test's problem rather than a renderer's.  The
+             * descent does not complete one emulated frame of this machine, so
+             * tools/probe.py samples the loop at a fixed point INSIDE it --
+             * and any code between the step and this line is a window in which
+             * the ship has moved and the camera has not.  p10_camera reads the
+             * two and holds the camera against the ship's own altitude, so a
+             * sample in that window is a camera that looks one tick late.
+             * Nothing here depends on cam, and everything below does. */
+            cam = camera_for(ship.y, world_h);
+
+            /* ...and the ring, from THAT camera and not from the one the last
+             * tick ended on.  A life starts at the top of the world and the
+             * ring is wherever the previous one left it -- up to eighty rows
+             * down, which is more than the map can hold, so a restart REBUILDS
+             * the band instead of walking it.  ship_init() is what raises the
+             * flag; this is the one place it is lowered, and it is lowered from
+             * the camera the tick will actually be drawn at. */
+            if (ring_stale) {
+                ring_fill((uint8_t)(cam >> 3));
+                ring_stale = 0;
+            }
+
             /* ---- sound.  The ONE place any of the play_* functions is called
              * from -- see the essay above them for why the draw path and the
              * decode above are both wrong places for one.  All three read what
@@ -820,21 +1007,11 @@ void main(void)
             }
             sfx_state = ship.state;
 
-            /* The HUD, and only the HUD -- the terrain underneath it was
-             * written when the field was handed over and has not moved since.
-             * There is no dirty flag anywhere in this file: the strip is built
-             * from the state and sent on EVERY tick, because the numbers in it
-             * change on every tick, and a gate that had to notice that would be
-             * a gate that is always open. */
+            /* The HUD, and only the HUD.  The terrain is the ring's business
+             * now (see the vblank below), but the strip is still built here and
+             * sent on EVERY tick: the numbers in it change on every tick, and a
+             * gate that had to notice that would be a gate that is always open. */
             build_hud();
-
-            /* The camera for THIS tick, from the ship the step above just
-             * moved.  A pure function of the state and the world, recomputed
-             * rather than accumulated, so nothing here can drift, a restart
-             * cannot leave the view wound down the world, and there is no
-             * smoothing constant to tune.  cam is what ship_draw() subtracts
-             * and what the tick loop below hands SCY. */
-            cam = camera_for(ship.y, world_h);
 
             /* Drawn from the state, every tick.  A renderer that kept its own
              * copy of the position would drift from the physics and nothing on
@@ -864,12 +1041,47 @@ void main(void)
              * become a ring. */
             SCY_REG = (uint8_t)cam;
 
-            /* Then two rows of twenty tiles, one wait each for the PPU's
-             * blanking window.  The tilemap this lands in is the one the NEXT
-             * frame's reads see, which is the same one-vblank relationship the
-             * shadow OAM has had since P3 -- and the reason probe.p6_hud allows
-             * the screen's numbers to be one tick behind the state's. */
-            set_bkg_tiles(0, 0, VIEW_W, 2, bg);
+            /* THEN the ring, in the SAME blanking window as the scroll above it
+             * -- and the pairing is the whole of the phase's ordering.  SCY and
+             * the row the scroll has just uncovered are two halves of one
+             * picture: write the scroll this vblank and the row the next one and
+             * the bottom line of the screen shows a row of the world that has
+             * not been drawn yet, for exactly one frame, every frame.  It reads
+             * as a stale row that tracks the camera -- a scrolling bug -- and it
+             * is an ordering bug.  The family has measured the same split from
+             * the other side: a BG map write ripens a frame after a shadow-OAM
+             * write made in the same vblank (Checkers' glide), so a row written
+             * anywhere but here would land against the wrong scroll.
+             *
+             * ring_stale is the restart: a full band, 32 rows, once per life. */
+            if (ring_stale) {
+                ring_fill((uint8_t)(cam >> 3));
+                ring_stale = 0;
+            } else {
+                ring_stream();
+            }
+
+            /* ...and the HUD LAST, at the map rows the CAMERA puts it on.  The
+             * strip is two rows of MAP, so it can only be at the top of the
+             * SCREEN if it moves with the scroll: rows 0 and 1 of the map are
+             * the top of the picture only while the camera is at a multiple of
+             * 32 rows, and a HUD pinned there scrolls up the screen and wraps
+             * round the bottom of the world.  Two single-row writes rather than
+             * one two-row write because `cam_row + 1` wraps to map row 0 at the
+             * end of the ring, and one rectangular write across that seam is
+             * two writes whatever it is spelled as.
+             *
+             * LAST and not first: ring_stream()'s climb case re-draws the row
+             * leaving the strip, and at the TOP of the world the row the band
+             * uncovers is the strip's own -- so the HUD has to be the write
+             * that wins.  The tilemap this lands in is the one the NEXT frame's
+             * reads see, which is the same one-vblank relationship the shadow
+             * OAM has had since P3 -- and the reason probe.p6_hud allows the
+             * screen's numbers to be one tick behind the state's. */
+            set_bkg_tiles(0, (uint8_t)((cam >> 3) & (MAP_ROWS - 1)),
+                          VIEW_W, 1, bg);
+            set_bkg_tiles(0, (uint8_t)(((cam >> 3) + 1) & (MAP_ROWS - 1)),
+                          VIEW_W, 1, &bg[VIEW_W]);
         }
     }
 }
