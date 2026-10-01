@@ -11,18 +11,21 @@ a life.
 
 | Button | What it does |
 |--------|--------------|
-| d-pad UP | thrust. **Hold it** to keep burning — the engine runs as long as you hold, and the tank empties the whole time |
-| A | turn the nose one step to the left (anticlockwise) |
-| B | turn the nose one step to the right (clockwise) |
+| d-pad LEFT | turn the nose one step to the left (anticlockwise) |
+| d-pad RIGHT | turn the nose one step to the right (clockwise) |
+| A or B | thrust. **Hold one** to keep burning — the engine runs as long as you hold, and the tank empties the whole time |
 | START | start a new life — while flying, or after a landing or a crash |
-| SELECT | on the title screen, switch between the two modes |
+| SELECT | back to the title screen — in flight, or after a landing or a crash. On the title it switches between the two modes |
 
-A and B are one step per press: holding one down turns the ship once, not
-continuously. There are sixteen steps in a full turn.
+LEFT and RIGHT are one step per press: holding one down turns the ship once, not
+continuously. There are sixteen steps in a full turn. Thrust is the other kind of
+control — a held one, and either face button will do it.
 
 On the title screen, SELECT picks between **LANDER** and **DESCENT**, and START
-plays whichever one the title names. They are the same ship, the same landing
-rule and the same tank; what differs is the world.
+plays whichever one the title names. SELECT in flight abandons the life and goes
+back there, so a mode you did not mean to be in is one press away from the one
+you did. They are the same ship, the same landing rule and the same tank; what
+differs is the world.
 
 - **LANDER** — the short world. One 160-pixel screen, wrapping left to right.
   The ground sits low on it and the ship opens with most of a screen of air

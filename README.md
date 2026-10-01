@@ -51,14 +51,17 @@ refactor of the physics, the tests and the checks. `terrain.h` and
 
 | Button | What it does |
 |---|---|
-| d-pad UP | thrust. **Hold** it to keep burning — this one reads the held button, not the edge |
-| A | rotate one step anticlockwise |
-| B | rotate one step clockwise |
+| d-pad LEFT | rotate one step anticlockwise |
+| d-pad RIGHT | rotate one step clockwise |
+| A or B | thrust. **Hold** one to keep burning — this is the held control, not the edge |
 | START | restart the life — mid-flight, after a landing, after a crash |
-| SELECT | on the title screen, switch between **LANDER** and **DESCENT** |
+| SELECT | back to the title — in flight, after a landing, after a crash; on the title itself, switch between **LANDER** and **DESCENT** |
 
-A and B are edges: one press is one 22.5° step, and holding one down does not
-spin the ship. There are 16 headings and the nose always points the way thrust
+LEFT and RIGHT are edges: one press is one 22.5° step, and holding one down does
+not spin the ship. Thrust is the opposite — a held level, on both face buttons
+because the DMG has no shoulder pair to put it on and it is the one control that
+has to be held *while* the ship is steered. There are 16 headings and the nose
+always points the way thrust
 acceleration does, because the sprite frame and the thrust vector come out of
 the same heading byte.
 

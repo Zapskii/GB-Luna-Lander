@@ -215,12 +215,12 @@ static uint16_t frame;
 
 /* This tick's joypad poll, the one before it, and the edge between them.
  *
- * `pressed` is `keys & ~prev_keys`, and the split matters: START/A/B/SELECT are
- * ONE-SHOTS and read `pressed`, so holding B steps the heading once instead of
- * spinning the ship a whole revolution, while thrust reads `keys` so a held
- * button keeps burning fuel.  GBDK's joypad() is a raw read of the current
- * state -- it does not do this for you -- so `prev_keys` has to be in main.c's
- * storage, next to `keys`, and nowhere else. */
+ * `pressed` is `keys & ~prev_keys`, and the split matters: START/LEFT/RIGHT/
+ * SELECT are ONE-SHOTS and read `pressed`, so holding LEFT steps the heading
+ * once instead of spinning the ship a whole revolution, while thrust reads
+ * `keys` so a held button keeps burning fuel.  GBDK's joypad() is a raw read of
+ * the current state -- it does not do this for you -- so `prev_keys` has to be
+ * in main.c's storage, next to `keys`, and nowhere else. */
 static uint8_t keys, prev_keys, pressed;
 
 /* This tick's decoded pad.  A file-scope static and NOT a local of main()'s,
@@ -1078,9 +1078,38 @@ void main(void)
         pressed = (uint8_t)(keys & ~prev_keys);
         prev_keys = keys;
 
-        /* The title.  SELECT is the mode toggle and this is the only place it
-         * exists: a game never swaps underneath the player once it is running.
-         * An EDGE, so holding it does not flip the mode every tick.
+        /* SELECT IN FLIGHT IS THE WAY BACK OUT.  Handled HERE, ahead of both
+         * screen branches, and not from inside the play one: the tick that
+         * leaves the field has to be the tick that builds the title, and run
+         * from the play branch the title branch above has already been passed
+         * for this tick -- the field would be re-drawn, one tick stale, under a
+         * title built on top of it.
+         *
+         * THE SELECT BIT IS CLEARED ON THE WAY OUT and that is load-bearing
+         * rather than tidy: the title's own SELECT is the mode toggle just
+         * below, it reads this same `pressed`, and without the clear one press
+         * would do both -- leave the field AND flip the world on arrival.
+         *
+         * Three VRAM writes, and the third is not the map.  SCY is the field's
+         * and the title is not scrolled, so it goes back to 0.  The window is
+         * the HUD's and its two rows still hold the last telemetry; the
+         * title's own first two rows are blank after build_title(), so pushing
+         * those to the window IS the clear.  A 20x18 map write is a three-frame
+         * stall (see the note below), which is fine for a menu press paid
+         * once. */
+        if (game == ST_PLAY && (pressed & J_SELECT)) {
+            pressed &= (uint8_t)~J_SELECT;
+            game = ST_TITLE;
+            SCY_REG = 0;
+            build_title();
+            set_bkg_tiles(0, 0, VIEW_W, VIEW_H, bg);
+            set_win_tiles(0, 0, VIEW_W, 2, bg);
+        }
+
+        /* The title.  SELECT is the mode toggle.  An EDGE, so holding it does
+         * not flip the mode every tick -- and the arrival from the field above
+         * has already taken its bit out, so leaving DESCENT and landing here
+         * does not also toggle the mode.
          *
          * A press re-sends the ONE row that changed rather than the screen: the
          * title is otherwise still, and a 20x18 map write is a three-frame
@@ -1109,21 +1138,30 @@ void main(void)
         }
 
         if (game == ST_PLAY) {
-            /* Decode the pad into sim.h's flags.  UP is thrust (held: `keys`),
-             * A and B are the two rotation steps (one-shot: `pressed`) -- A
-             * turns the nose one step anticlockwise and B clockwise, so they
-             * undo each other exactly. */
+            /* Decode the pad into sim.h's flags.  A and B are thrust (held:
+             * `keys`), LEFT and RIGHT are the two rotation steps (one-shot:
+             * `pressed`) -- LEFT turns the nose one step anticlockwise and
+             * RIGHT clockwise, so they undo each other exactly.
+             *
+             * THE ROTATION USED TO BE A AND B and it moved here for the hand,
+             * not for the code: thrust is the one control that has to be HELD
+             * while the ship is steered, and a d-pad UP is the one direction a
+             * thumb cannot hold and still reach the other three.  The DMG has
+             * no shoulder buttons -- J_LFT/J_RGT do not exist in gb/gb.h, there
+             * are exactly eight bits on the register -- so "the two face
+             * buttons" is the only pair left to put a held control on, and LEFT
+             * /RIGHT is where a one-shot pair belongs once they are free. */
             input = 0;
-            if (keys & J_UP)    input |= SHIP_THRUST;
-            if (pressed & J_A)  input |= SHIP_ROT_L;
-            if (pressed & J_B)  input |= SHIP_ROT_R;
+            if (keys & (J_A | J_B))     input |= SHIP_THRUST;
+            if (pressed & J_LEFT)       input |= SHIP_ROT_L;
+            if (pressed & J_RIGHT)      input |= SHIP_ROT_R;
 
             /* START restarts the life -- after a crash, after a landing, or
              * mid-flight if the player simply wants another go.  An EDGE and
-             * not a level, like A and B: read `keys` here and holding START
-             * would reset the ship on every tick, so it would never fall at all
-             * and the game would look frozen rather than restarted.  It is
-             * also what seats a fresh ship on the tick the title is cleared. */
+             * not a level, like LEFT and RIGHT: read `keys` here and holding
+             * START would reset the ship on every tick, so it would never fall
+             * at all and the game would look frozen rather than restarted.  It
+             * is also what seats a fresh ship on the tick the title is cleared. */
             if (pressed & J_START)
                 ship_init();
 

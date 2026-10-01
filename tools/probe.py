@@ -859,10 +859,10 @@ def p4_thrust(g):
     # rather than exactly THRUST fails here rather than passing on a sign.
     k = THRUST_SPAN
     a = g.ship()
-    g.run(k, "U")
+    g.run(k, "A")
     b = g.ship()
     check(b["fuel"] == a["fuel"] - FUEL_BURN * k,
-          "holding UP burns exactly %d fuel per tick (%d -> %d over %d ticks)"
+          "holding A burns exactly %d fuel per tick (%d -> %d over %d ticks)"
           % (FUEL_BURN, a["fuel"], b["fuel"], k))
     check(b["vy"] - a["vy"] == (GRAV - THRUST) * k,
           "and the net vertical acceleration has REVERSED -- vy rises by "
@@ -880,6 +880,24 @@ def p4_thrust(g):
           "and nothing burns with the button up (%d -> %d)"
           % (c["fuel"], d["fuel"]))
 
+    # ---- and B is the same button -----------------------------------------
+    # Both face buttons thrust.  That is one OR in main.c's decode and the only
+    # line of it a probe press can see directly, so it is asserted against A's
+    # own numbers over the same span: a B left inert, or left wired to a
+    # rotation step that has since moved out from under it, fails here -- and
+    # it fails as the heading changing, which is not a thrust bug at all.
+    e0 = g.ship()
+    g.run(k, "B")
+    e1 = g.ship()
+    check(e1["fuel"] == e0["fuel"] - FUEL_BURN * k and
+          e1["vy"] - e0["vy"] == (GRAV - THRUST) * k,
+          "and B thrusts identically -- the same %d fuel burnt and the same "
+          "reversal (%d -> %d fuel, vy %d -> %d)"
+          % (FUEL_BURN * k, e0["fuel"], e1["fuel"], e0["vy"], e1["vy"]))
+    check(e1["heading"] == e0["heading"],
+          "and neither face button turns the ship any more (heading %d)"
+          % e1["heading"])
+
     # ---- the tank ---------------------------------------------------------
     # One emulated frame is one tick is one burn, so this counts FRAMES -- and
     # a step that burned fuel per RENDER rather than per tick lands somewhere
@@ -890,11 +908,11 @@ def p4_thrust(g):
     f0 = g.ship()["fuel"]
     spent = 0
     while g.ship()["fuel"] and spent < FUEL_START + 200:
-        g.run(1, "U")
+        g.run(1, "A")
         spent += 1
     e = g.ship()
     if not check(e["fuel"] == 0,
-                 "holding UP empties the tank (%d of %d fuel left after %d "
+                 "holding A empties the tank (%d of %d fuel left after %d "
                  "ticks)" % (e["fuel"], FUEL_START, spent)):
         return
     check(spent == (f0 + FUEL_BURN - 1) // FUEL_BURN,
@@ -903,27 +921,27 @@ def p4_thrust(g):
                                   (f0 + FUEL_BURN - 1) // FUEL_BURN, spent))
 
     # ---- empty: the button is inert ---------------------------------------
-    # The other half of the target.  With the tank dry, holding UP changes the
+    # The other half of the target.  With the tank dry, holding A changes the
     # trajectory by NOTHING at all -- vy falls by gravity alone and vx does not
     # move -- so the ship is committed to its descent.
     f = g.ship()
-    g.run(k, "U")
+    g.run(k, "A")
     h = g.ship()
     check(h["vy"] - f["vy"] == GRAV * k and h["vx"] == f["vx"] and h["fuel"] == 0,
-          "an empty tank makes thrust inert -- %d ticks of held UP change vy "
+          "an empty tank makes thrust inert -- %d ticks of held A change vy "
           "by exactly GRAV * %d == %d and leave vx at %d (vy %d -> %d)"
           % (k, k, GRAV * k, f["vx"], f["vy"], h["vy"]))
 
     # ---- the stick: one press, one step, and the frame follows it ---------
-    # A and B are EDGES, so they are held for several frames on purpose: an
+    # LEFT and RIGHT are EDGES, so they are held for several frames on purpose: an
     # edge that fired once per frame would spin the ship through a whole
     # revolution on one press, and holding is the only way to tell from the
-    # outside.  The heading is 0 here -- nothing above pressed A or B.
+    # outside.  The heading is 0 here -- nothing above pressed LEFT or RIGHT.
     h0 = g.ship()["heading"]
-    g.run(4, "B")
+    g.run(4, "R")
     h1 = g.ship()["heading"]
     check(h1 == (h0 + 1) % ROT_STEPS,
-          "four frames of held B are ONE rotation step, not four (heading "
+          "four frames of held RIGHT are ONE rotation step, not four (heading "
           "%d -> %d)" % (h0, h1))
 
     # One vblank of slack, and no more: set_sprite_tile writes GBDK's SHADOW
@@ -935,9 +953,9 @@ def p4_thrust(g):
           "and the sprite frame follows the heading (heading %d draws tile "
           "0x%02X, expected 0x%02X)" % (h1, g.oam()[2], SPR_SHIP0 + h1))
 
-    g.run(4, "A")
+    g.run(4, "L")
     check(g.ship()["heading"] == h0,
-          "A steps the other way, back to where we started (heading %d)"
+          "LEFT steps the other way, back to where we started (heading %d)"
           % g.ship()["heading"])
 
     # A button-free tick between two presses, and it is not optional: run()
@@ -946,7 +964,7 @@ def p4_thrust(g):
     # following press is not an EDGE.  Two presses back to back would read as
     # one and this assertion would fail on a perfectly good ROM.
     g.run(2)
-    g.run(4, "A")
+    g.run(4, "L")
     check(g.ship()["heading"] == (h0 - 1) % ROT_STEPS,
           "and keeps going the other way past it, wrapping rather than "
           "underflowing (heading %d)" % g.ship()["heading"])
@@ -1062,7 +1080,7 @@ def p5_landing(g):
     # one-dimensional descent: it comes down the same column it started on.
     ticks = 0
     while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
-        g.run(1, "U" if g.ship()["vy"] > VY_HOLD else "")
+        g.run(1, "A" if g.ship()["vy"] > VY_HOLD else "")
         ticks += 1
     s = g.ship()
     check(s["state"] == ST_LANDED,
@@ -1166,11 +1184,11 @@ def p6_hud(g):
           "the HUD's FUEL reads the ship's own tank (%r against %d)"
           % (f0, a["fuel"]))
 
-    g.run(20, "U")                      # 20 ticks of held thrust
+    g.run(20, "A")                      # 20 ticks of held thrust
     b = g.ship()
     f1 = g.hud_num(HUD_FUEL_ROW, HUD_FUEL_COL, HUD_FUEL_W)
     check(b["fuel"] == a["fuel"] - FUEL_BURN * 20,
-          "20 ticks of held UP burn %d fuel (%d -> %d)"
+          "20 ticks of held A burn %d fuel (%d -> %d)"
           % (FUEL_BURN * 20, a["fuel"], b["fuel"]))
     check(f1 is not None and f0 is not None and f1 < f0,
           "and the fuel digits on the screen change as it burns (%r -> %r)"
@@ -1243,7 +1261,7 @@ def p6_hud(g):
     # the ship landed on.
     ticks = 0
     while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
-        g.run(1, "U" if g.ship()["vy"] > VY_HOLD else "")
+        g.run(1, "A" if g.ship()["vy"] > VY_HOLD else "")
         ticks += 1
     g.run(2)
     s = g.ship()
@@ -1328,10 +1346,10 @@ def p7_sound(g):
           "the title or the boot (NR12 0x%02X, volume %d)" % (idle, idle >> 4))
 
     # One held frame.  run() presses the button, ticks once and releases it, so
-    # the tick in between is a tick with UP down -- and the volume nibble of
+    # the tick in between is a tick with A down -- and the volume nibble of
     # NR12 is the engine: non-zero exactly when the ROM decided this tick
     # burned.
-    g.run(1, "U")
+    g.run(1, "A")
     loud = g.p.memory[NR12]
     check(loud >> 4 != 0,
           "and a thrust tick turns it up (NR12 0x%02X, volume %d)"
@@ -1384,7 +1402,7 @@ def p7_sound(g):
     g.run(8, "S")                       # START restarts the life
     ticks = 0
     while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
-        g.run(1, "U" if g.ship()["vy"] > VY_HOLD else "")
+        g.run(1, "A" if g.ship()["vy"] > VY_HOLD else "")
         ticks += 1
     land = g.p.memory[NR22]
     check(g.ship()["state"] == ST_LANDED and land >> 4 != 0,
@@ -1885,7 +1903,7 @@ def p11_stream(g):
     checked = 0
     climbed = 0
     for k in range(DESCENT_LIMIT):
-        g.run(1, "U")
+        g.run(1, "A")
         if g.ship()["state"] != ST_FLY:
             break
         top = g.u16("cam") >> 3
@@ -1926,7 +1944,7 @@ def p12_mode(g):
     """Two modes off the title, and a status bar that stays put while the world
     scrolls under it.
 
-    FOUR THINGS, and each of them is checked where it is observable:
+    FIVE THINGS, and each of them is checked where it is observable:
 
     THE BOOT DEFAULT IS READ RAW -- no keypress at all.  Which mode the ROM
     opens on is a claim about ONE initialiser, and a check that pressed START
@@ -1962,6 +1980,13 @@ def p12_mode(g):
     those 16 px are the ground of a DESCENT.  The descent below is long enough to
     reach the bound, and both the clamp and the row it leaves visible are read
     back.
+
+    THE FIELD CAN BE LEFT AGAIN, which is its own transition and not the
+    hand-over run backwards.  SELECT in flight goes to the title, SCY goes with
+    it, and the press must not also reach the title's mode toggle -- three
+    separate claims, and the last one is the trap: both branches read the same
+    edge off the same variable, so a ROM that did not consume the bit out of
+    `pressed` leaves the field and flips the world in the same tick.
 
     No claim is made about how any of it LOOKS beyond that: "the bar is legible"
     is an eye's, and this file never had one.
@@ -2087,12 +2112,40 @@ def p12_mode(g):
           % (cam_max, descent_h - PLAY_H_PX, descent_h - VIEW_H_PX,
              g.u16("cam")))
 
+    # ---- and SELECT takes the field away again ----------------------------
+    # The way BACK to the title, which the ROM did not have until this: the
+    # field is ST_PLAY and the title is ST_TITLE, and one press has to be the
+    # whole of the move.  Three things, and each is a way the move half-happens:
+    #
+    #   * the state really is the title, not the field redrawn-looking-like one;
+    #   * SCY is back to 0.  This is the DESCENT cartridge and its camera is at
+    #     the bottom clamp, so SCY was holding 680 % 256 = 168.  A title left
+    #     scrolled by a field that is no longer under it is the specific damage
+    #     of keeping the register, and nothing else here would see it -- the
+    #     window is NOT scrolled by SCY, so the mode line looks right regardless;
+    #   * `pick` is UNCHANGED.  The title's own SELECT is the mode toggle and it
+    #     reads the same edge this branch just consumed, so a ROM that forgot to
+    #     take the bit out of `pressed` leaves the field AND flips the world on
+    #     arrival -- which reads as the mode line changing under the player.
+    scrolled = g.p.memory[SCY]
+    g.run(4, "T")                       # the same edge the title's toggle uses
+    g.run(4)                            # the title is built on the tick of the press
+    check(g.var("game") == ST_TITLE and g.p.memory[SCY] == 0,
+          "SELECT in flight takes the field away and lands on the title -- game "
+          "%d, SCY %d (it was %d under the camera's clamp)"
+          % (g.var("game"), g.p.memory[SCY], scrolled))
+    check(g.var("pick") == 1 and bool(g.find_text("MODE DESCENT")),
+          "and the press did not carry through to the title's own mode toggle -- "
+          "still DESCENT (pick %d, mode line %r)"
+          % (g.var("pick"), g.find_text("MODE DESCENT")))
+
     # ---- the other mode, on its own cartridge -----------------------------
-    # The title hands over ONCE -- there is no way back to it -- so the second
-    # mode needs a second cartridge.  LANDER is the boot default, which is also
-    # the mode this check opened on, but it is reached HERE without a SELECT: the
-    # two runs share nothing but the ROM, and a `pick` that leaked between them
-    # would show up as the wrong profile below.
+    # The two modes need two runs because the boot default is a claim about the
+    # FIRST screen: the title hands over to the field and the field comes back,
+    # but neither run below needs that round trip, and a `pick` that leaked
+    # between them would show up as the wrong profile.  LANDER is the boot
+    # default, which is also the mode this check opened on, but it is reached
+    # HERE without a SELECT.
     g2 = Game(g.rom, g.mapfile)
     try:
         g2.run(150)
@@ -2261,7 +2314,7 @@ def p13_descent(g):
         alt = ground_under(descent, s["x"]) - (s["y"] + SHIP_H)
         burn = (s["vy"] > 0 and
                 alt * BRAKE_DIV <= s["vy"] * s["vy"] * P13_BRAKE)
-        g.run(1, "U" if burn else "")
+        g.run(1, "A" if burn else "")
         ticks += 1
         cam, scy = g.u16("cam"), g.p.memory[SCY]
         samples.append((g.ship()["y"], cam, scy))
@@ -2428,8 +2481,8 @@ def p13_descent(g):
     # it still falls the whole way).
     g.run(8, "S")
     g.run(2)
-    for _ in range(4):          # B four times: one step per press, not per frame
-        g.run(4, "B")
+    for _ in range(4):          # RIGHT four times: one step per press, not per frame
+        g.run(4, "R")
         g.run(2)
     check(g.ship()["heading"] == 4,
           "the second life is turned nose-first into the world -- heading 4 is "
@@ -2444,7 +2497,7 @@ def p13_descent(g):
     f1 = g.u16("frame")
     while g.ship()["state"] == ST_FLY and ticks < P13_WRAP_LIMIT:
         before = g.ship()
-        g.run(1, "U")           # held: heading 4, so this is sideways only
+        g.run(1, "A")           # held: heading 4, so this is sideways only
         ticks += 1
         s = g.ship()
         xs.append(s["x"])
