@@ -120,6 +120,63 @@ typedef char thrust_fits_int16[(THRUST <= 127) ? 1 : -1];
 #define SHIP_W 8
 #define SHIP_H 8
 
+/* ---------------------------------------------------------------- camera */
+
+/* The screen, in px.  Hardware, not a knob: 160x144 is the DMG's own panel and
+ * the camera below is the only thing in this file that has to know it.  A
+ * HEIGHT and not a width, and in PIXELS and not tiles, because the camera's
+ * output goes straight into SCY, a pixel register -- the `<< 3` that turns
+ * terrain.h's TILE rows into px is main.c's, and a camera that did it here
+ * would be a second place the two units meet.  main.c carries the tripwire
+ * that keeps this equal to its own VIEW_H. */
+#define SCREEN_H_PX 144
+
+/* Where on the screen the camera holds the ship: the upper THIRD.  The ship
+ * rides there rather than centring, so a descent reads as forward motion and
+ * the two thirds below it are ground the ship has not reached yet.  A third of
+ * 144 is 48, and the ship's TOP EDGE sits on that line -- which is what "in the
+ * upper third" means here, and what tests/test_sim.c pins.
+ *
+ * A CALIBRATION KNOB like GRAV and THRUST: how far up the ship rides is feel,
+ * and nothing below assumes this number, only that it is the top of the screen
+ * and not its middle.  The division is a constant expression, folded before
+ * codegen -- there is no __divuint here. */
+#define CAM_ANCHOR ((uint16_t)(SCREEN_H_PX / 3))
+
+/* Where the camera sits for a ship at `ship_y` in a world `world_h` px tall:
+ * the world row the TOP of the screen shows -- which is exactly what SCY wants,
+ * because the BG is the only thing a scroll register moves.
+ *
+ * PURE, and it is pure for a reason: the sweep in tests/test_sim.c is the whole
+ * of the tracking behaviour, and it can only be swept if the camera is a
+ * function of the ship's altitude rather than of anything main.c accumulates.
+ *
+ * THE BOTTOM CLAMP IS ON THE *WORLD*, NOT ON THE BG MAP'S 256 px, and that is
+ * the half of this that is wrong silently.  The world is ~800 px and the map is
+ * 256: a camera clamped to the map stops when the ship still has 600 px to
+ * fall, so the ground never comes into view and the last stretch of every
+ * descent is invisible -- while the scroll itself looks perfectly correct for
+ * the first 160 px.  The bound is `world_h - SCREEN_H_PX`: the greatest offset
+ * at which the world's LAST row is still on the screen.
+ *
+ * A world SHORTER than a screen (LANDER's is one screen and its profile ends at
+ * row 12) has nowhere to scroll, and `world_h > SCREEN_H_PX` is what makes the
+ * bound 0 there instead of a ~65000 unsigned wrap -- the same underflow the
+ * ceiling guard in ship_step() exists to prevent.  The TOP bound is the same
+ * hazard from the other end: `ship_y - CAM_ANCHOR` at the top of the world goes
+ * negative, and one `>` is what keeps it 0 rather than 65000, which the min
+ * below would read as "the camera is at the bottom" and drop the view onto the
+ * ground on the first frame of a life.
+ *
+ * Everything here is +, - and compares: no divide, so no runtime helper. */
+static uint16_t camera_for(uint16_t ship_y, uint16_t world_h)
+{
+    uint16_t top = (ship_y > CAM_ANCHOR) ? (uint16_t)(ship_y - CAM_ANCHOR) : 0;
+    uint16_t bottom = (world_h > SCREEN_H_PX) ? (uint16_t)(world_h - SCREEN_H_PX) : 0;
+
+    return (top < bottom) ? top : bottom;
+}
+
 /* ------------------------------------------------------------------ ship */
 
 /* What the ship is doing.  ST_FLY is 0 so a zeroed Ship is a flying one --

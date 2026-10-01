@@ -42,6 +42,13 @@ LCDC = 0xFF40
 LCDC_ON = 0x80                  # bit 7: the display.  While it is set the PPU
                                 # locks VRAM, which is the whole of p1_boot's
                                 # second assertion.
+SCY = 0xFF42                    # the BG's vertical scroll: what main.c's
+                                # camera writes, and the ONE register this
+                                # phase is about.  Read in VBlank by the PPU as
+                                # it draws, so a mid-frame write tears the frame
+                                # -- which PyBoy will not show and no tilemap
+                                # read can catch, so the check below is about
+                                # the VALUE, not about where the write sits.
 OAM = 0xFE00                    # 4 bytes per slot: y, x, tile, attrs
 OAM_DY, OAM_DX = 16, 8          # an 8x8 sprite DRAWS at (x-8, y-16), so the
                                 # raw OAM byte is the position plus this.
@@ -78,6 +85,15 @@ PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at
 # rows are.
 MAP_TILES = 32
 DESCENT_ROW0 = 84
+
+# P10's camera, mirrored for the same reason.  VIEW_H_PX is sim.h's SCREEN_H_PX
+# -- the panel is 144 px and it is the number the camera's bottom clamp
+# subtracts; CAM_ANCHOR is how far up the screen the camera holds the ship, a
+# third of it.  `world_h` is NOT mirrored here: it is read out of the ROM's own
+# map, because the point of that symbol is that main.c derives it from the
+# profile rather than from a constant somebody could forget to change.
+VIEW_H_PX = VIEW_H * 8
+CAM_ANCHOR = VIEW_H_PX // 3
 
 # main.c's screen state and its HUD layout, mirrored for the same reason the
 # tile ids are.  Where a number SITS is part of the HUD, not a detail of it: a
@@ -1295,10 +1311,202 @@ def p9_window(g):
           % (WORLD_COLS, len(off0), DESCENT_ROW0, VIEW_H))
 
 
+# ----------------------------------------------------------------- P10 -----
+def p10_camera(g):
+    """The camera tracks the ship while it is free and holds at each bound --
+    and both halves of it are observable here, which is the whole point.
+
+    SCY is what the PPU is told to scroll the background by.  The SHIP's own
+    screen position is what the sprite is drawn at, and it is the half a camera
+    written to a variable but never SUBTRACTED from the draw call would fail:
+    SCY moves the background and nothing else, so the ship would slide off the
+    top of the screen at exactly the speed the view scrolled beneath it, while
+    SCY itself tracked the ship perfectly and a check that only read SCY would
+    call that a pass.  The sprite is therefore read too, and it is the assertion
+    with the real power.
+
+    The world is DESCENT's, because it is the only one with anywhere to travel:
+    LANDER's is 104 px against a 144 px screen, so its camera is pinned at 0 and
+    reads identical to P9's there.  Selecting it is the same two presses
+    p9_window makes, and for the same reason -- P9 wired the title's mode to the
+    terrain POINTER, so the tall world is reachable even though playing it is
+    M2's job.
+
+    NO CLAIM IS MADE about how it LOOKS.  P9's window blit is still a fixed
+    band, so the view below it is blank by design and P11 is what fills it; what
+    is asserted is the SCROLL and the SHIP, both of which are live now.
+    """
+    print("P10 camera")
+    if not g.need("terrain", "terrain_descent", "ship"):
+        return
+
+    g.run(150)
+    g.run(4, "T")           # SELECT: the title's DESCENT half
+    g.run(2)                # button-free: the next press is an EDGE
+    g.run(8, "S")           # START: the tall world, and the field is handed over
+    g.run(2)
+
+    # A symbol this phase introduces being ABSENT is an assertion failure, not a
+    # harness error, and both are named here BEFORE either is read: a missing
+    # one would raise and answer 2, which a power gate must not.  The descent
+    # below runs either way -- see the SCY assertion -- so an older ROM fails on
+    # the behaviour as well as on the name.
+    have = g.need("cam", "world_h")
+
+    # ---- fly it, sampling every tick -------------------------------------
+    # SCY is ordinary memory to PyBoy and the ship is P3's struct, so this half
+    # needs NO symbol this phase introduces -- and that is deliberate: it is the
+    # power gate.  The previous phase's ROM has the DESCENT world and the ship
+    # and never writes SCY at all, so over a whole descent the scroll is pinned
+    # at 0 and the assertion below fails on the behaviour rather than on a
+    # missing name.
+    samples = []
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1)
+        ticks += 1
+        samples.append((g.ship()["y"], g.u16("cam") if have else None,
+                        g.p.memory[SCY]))
+    check(len(samples) > 8 and g.ship()["state"] != ST_FLY,
+          "the scripted descent reached the ground in %d ticks (%d samples)"
+          % (ticks, len(samples)))
+
+    scy_seen = sorted({s[2] for s in samples})
+    check(len(scy_seen) > 1,
+          "and SCY MOVED during it -- the camera is written at all (SCY took "
+          "%d distinct values over %d ticks, first %r, last %r)"
+          % (len(scy_seen), len(samples), samples[0][2], samples[-1][2]))
+    if not have:
+        return
+
+    # ---- the ROM's own geometry ------------------------------------------
+    descent = g.profile("terrain_descent")
+    world_h = (max(descent) + 1) * 8        # the deepest column, +1 tile of ground
+    cam_max = world_h - VIEW_H_PX
+    check(g.u16("world_h") == world_h and world_h > VIEW_H_PX,
+          "the ROM takes the world's height from the profile it is drawing, so "
+          "the clamp and the tiles cannot be about two worlds -- %d px from "
+          "DESCENT's deepest row %d, against the screen's %d"
+          % (g.u16("world_h"), max(descent), VIEW_H_PX))
+
+    # ---- the camera, tick by tick ----------------------------------------
+    # Every sample against the rule, written out here rather than imported from
+    # sim.h -- a probe that asked the ROM what the answer should be could not
+    # tell a camera whose anchor had drifted from one that had not.
+    #
+    # ONE ITERATION OF SLACK, and no more.  main.c computes cam from ship.y
+    # inside the tick, and these are two separate reads of the emulator's memory
+    # -- so a sample that lands between the step and the camera is legitimately
+    # this tick's altitude against the previous tick's camera.  The slack is in
+    # the PHASE, never in the value: the accepted answer is the rule at the
+    # altitude before or the altitude now, and a camera with the wrong anchor,
+    # or one clamped to the map's 256 px, answers neither at any altitude.
+    #
+    # SCY is the camera's LOW BYTE and not the camera: the world is ~800 px and
+    # one scroll register is 256, so the scroll wraps and repeats.  Comparing it
+    # to the full 664 would be comparing against a value the hardware cannot
+    # hold; what has to be true is the fold, and pinning the fold is what says
+    # P11 has a wrap to make seamless rather than a mystery.
+    #
+    # SCY carries the same one-iteration slack for the same reason and from the
+    # other end of the tick: cam is computed BEFORE wait_vbl_done() and SCY is
+    # written in the vblank AFTER it, so a sample taken between the two sees the
+    # new camera against the scroll that was written a tick ago.
+    def want_cam(y):
+        return min(max(y - CAM_ANCHOR, 0), cam_max)
+
+    bad = []
+    for k, (y1, c1, s1) in enumerate(samples):
+        y0 = samples[k - 1][0] if k else y1
+        c0 = samples[k - 1][1] if k else c1
+        if c1 not in (want_cam(y0), want_cam(y1)) or s1 not in (c0 & 0xFF, c1 & 0xFF):
+            bad.append((y0, y1, c1, s1))
+    check(not bad,
+          "cam is the clamp of ship_y - %d to the WORLD's bound %d -- not the "
+          "map's 256 px -- at every sampled tick, and SCY is its low byte "
+          "(y_prev:y:cam:scy %r)" % (CAM_ANCHOR, cam_max, bad[:4]))
+
+    # ---- the two bounds, held constant -----------------------------------
+    pinned_top = [c for (y, c, _) in samples if y <= CAM_ANCHOR]
+    check(len(pinned_top) >= 4 and set(pinned_top) == {0},
+          "before the descent starts the camera is pinned at 0 -- %d samples at "
+          "or above y %d, cam values %r"
+          % (len(pinned_top), CAM_ANCHOR, sorted(set(pinned_top))))
+
+    pinned_bot = [c for (y, c, _) in samples if y - CAM_ANCHOR >= cam_max]
+    check(len(pinned_bot) >= 4 and set(pinned_bot) == {cam_max},
+          "and once the ship is within a screen of the pad it is pinned at %d, "
+          "so the view does not scroll past the bottom of the world -- %d "
+          "samples at or below y %d, cam values %r"
+          % (cam_max, len(pinned_bot), cam_max + CAM_ANCHOR,
+             sorted(set(pinned_bot))))
+
+    # ---- and it TRACKS in between ----------------------------------------
+    # Two things at once, and neither implies the other.  It never moves BACK
+    # UP, so the view cannot judder as the ship falls; and it advances across
+    # the free window by as much as the ship fell through it, so a camera that
+    # held or stepped -- or one that only ever moved for a frame or two -- does
+    # not pass on the bounds assertions above alone.
+    free_y = [y for (y, c, _) in samples if 0 < c < cam_max]
+    free_c = [c for (_, c, _) in samples if 0 < c < cam_max]
+    span = max(free_y) - min(free_y)
+    check(len(free_c) >= 4 and all(b >= a for a, b in zip(free_c, free_c[1:]))
+          and free_c[-1] - free_c[0] >= span - 4,
+          "between the bounds it tracks the ship rather than holding or "
+          "stepping -- %d unclamped samples, none moving back up, and the "
+          "camera advanced %d px across the %d px the ship fell (%r ... %r)"
+          % (len(free_c), free_c[-1] - free_c[0], span, free_c[:3], free_c[-3:]))
+
+    # ---- the SPRITE, which is the half that is silently wrong -------------
+    # The assertion a camera kept in a variable but never taken off the draw
+    # call fails: move_sprite() would be handed the ship's WORLD y, which for a
+    # ship 700 px down the world is a byte that wraps into the top of the screen
+    # -- so the ship would appear to jump about as the view scrolled, at a
+    # position that has nothing to do with cam.
+    #
+    # START first: the descent above ended in a crash, and the ship is frozen.
+    # 150 frames and not 60: the descent spends its first ~30 ticks with the
+    # camera pinned at the top, and the ROM does not complete one tick per
+    # emulated frame in this world (P9's per-tick cost, unmoved by this phase),
+    # so a short window would sample almost nothing but the clamp.
+    g.run(8, "S")
+    g.run(1)
+    y0, c0 = g.ship()["y"], g.u16("cam")
+    bad = []
+    seen = 0
+    for _ in range(150):
+        g.run(1)
+        y1, c1 = g.ship()["y"], g.u16("cam")
+        oy = g.oam()[0]
+        if 0 < min(c0, c1) and max(c0, c1) < cam_max:
+            seen += 1
+            # One vblank of slack, and no more: move_sprite() writes GBDK's
+            # SHADOW OAM and only the next vblank copies it, so which side of
+            # the copy this sample lands on is decided by the length of the loop
+            # body.  The slack is in the PHASE -- the accepted answer on either
+            # side is the tick before or the tick after -- and never in the
+            # value, so a ship drawn at its world y (hundreds of px out, and
+            # truncated to a byte) fails on every one of them.
+            want = {((y0 - c0 + OAM_DY) & 0xFF), ((y1 - c1 + OAM_DY) & 0xFF)}
+            if oy not in want:
+                bad.append((y0, c0, y1, c1, oy, sorted(want)))
+        y0, c0 = y1, c1
+    # `seen` is not decoration: every comparison above is skipped while the
+    # camera is clamped, so a camera that never came off its bound would leave
+    # `bad` empty and this pass trivially.  The count is what stops that, and it
+    # is the same false-PASS shape the 60 ticks exist to avoid.
+    check(seen >= 30 and not bad,
+          "and the sprite is drawn at the CAMERA's idea of the ship's screen y "
+          "-- world y minus cam, which holds it at %d -- rather than at its "
+          "world y (%d of 150 ticks were free; y0:cam0:y1:cam1:oamY:want %r)"
+          % (CAM_ANCHOR, seen, bad[:4]))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
-          ("p7_sound", p7_sound), ("p9_window", p9_window)]
+          ("p7_sound", p7_sound), ("p9_window", p9_window),
+          ("p10_camera", p10_camera)]
 
 
 def main(rom, mapfile, only=None):

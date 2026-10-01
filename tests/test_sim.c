@@ -33,6 +33,12 @@
  * out of sim.h -- a check that read the screen would prove the renderer, which
  * is three lines of wiring in main.c.
  *
+ * P10 is the camera, and it is swept HERE rather than sampled in the probe: the
+ * phase is a pure function of the ship's altitude, so the honest check is every
+ * altitude from above the world to below it, against both of the ROM's worlds.
+ * What the probe can add is only that main.c WRITES the answer it computed and
+ * subtracts it from the sprite, neither of which is visible from a host.
+ *
  *     make test
  */
 #include <stdarg.h>
@@ -521,6 +527,102 @@ int main(void)
         ship_step(&s, 0);
         check(s.x == 0,
               "and leaving the RIGHT edge arrives at x 0 (x %d)", s.x);
+    }
+
+    /* ----------------------------------------------------------- P10 ---- */
+
+    {
+        /* THE SWEEP, and it is a sweep rather than a few samples because the
+         * camera's whole behaviour IS this one function: the tracking is exact
+         * (the ship is pinned at CAM_ANCHOR on screen) and the two clamps are
+         * the only places it stops.  Every altitude from above the world to
+         * well below it, so a camera that clamps at the wrong bound -- the BG
+         * map's 256 px, which is this phase's named trap -- disagrees with the
+         * sweep in the middle and nowhere near its ends.
+         *
+         * The two worlds are the ROM's own: DESCENT's is three screens tall and
+         * is the only one with anywhere to scroll, and LANDER's is under one
+         * screen and must therefore never scroll at all.  `bottom` is the
+         * world's bound, 664 px -- the map's 256 would be 112, and the two
+         * differ by the six hundred px of ground a map-clamped view never
+         * reaches. */
+        const uint16_t tall = 808;      /* DESCENT: deepest row 100, +1 tile  */
+        const uint16_t flat = 104;      /* LANDER:  deepest row 12,  +1 tile  */
+        const uint16_t bottom = tall - SCREEN_H_PX;
+        uint16_t y, cam, want, prev = 0;
+        uint16_t off = 0, back = 0, third = 0, top = 0, bot = 0;
+
+        for (y = 0; y <= 1100; y++) {
+            cam = camera_for(y, tall);
+            want = (y > CAM_ANCHOR) ? (uint16_t)(y - CAM_ANCHOR) : 0;
+            if (want > bottom)
+                want = bottom;
+            if (cam != want)
+                off++;
+            if (cam < prev)
+                back++;
+            prev = cam;
+            /* While the camera is FREE the ship is held at or above the third
+             * line.  Once it is pinned at the bottom bound the ship is allowed
+             * to sink further, and it must: the last of the world is arriving
+             * under it, and a camera that refused to let go would show the ship
+             * sliding up the screen as it fell. */
+            if (cam < bottom && (uint16_t)(y - cam) > CAM_ANCHOR)
+                third++;
+            if (y <= CAM_ANCHOR && cam == 0)
+                top++;
+            if (y >= bottom + CAM_ANCHOR && cam == bottom)
+                bot++;
+        }
+
+        check(off == 0,
+              "the camera is the clamp of ship_y - %d to the WORLD's bounds "
+              "[0, %d] -- not the map's 256 px -- at every altitude (%u of 1101 "
+              "disagree)", CAM_ANCHOR, bottom, off);
+        check(third == 0,
+              "and while it is free the ship's on-screen y never drops below "
+              "the third line %d (%u altitudes did)", CAM_ANCHOR, third);
+        check(back == 0,
+              "the camera never moves back UP as the ship descends, so the view "
+              "cannot judder (%u altitudes)", back);
+        check(top == CAM_ANCHOR + 1,
+              "it is pinned at 0 for every altitude at or above the anchor %d, "
+              "so the view does not hang off the TOP of the world (%u of %d)",
+              CAM_ANCHOR, top, CAM_ANCHOR + 1);
+        check(bot == 1101 - (bottom + CAM_ANCHOR),
+              "and pinned at the world bound %d once the ship is within a "
+              "screen of the ground (%u altitudes), which is where the map's "
+              "256 px would stop the view instead", bottom, bot);
+
+        /* The other trap the bound hides: a world with nowhere to scroll.  The
+         * bottom bound is `world_h - SCREEN_H_PX` and world_h is a uint16_t, so
+         * an unguarded subtraction here wraps to ~65000 and the camera would
+         * slam to the bottom of a world that has no bottom -- LANDER's view
+         * would be yanked off its ground on the first tick of a life. */
+        off = 0;
+        for (y = 0; y <= 1100; y++)
+            if (camera_for(y, flat) != 0)
+                off++;
+        check(off == 0,
+              "a world shorter than the screen (%d px against %d) never scrolls "
+              "-- the bottom bound is 0, not a wrap (%u altitudes)",
+              flat, SCREEN_H_PX, off);
+
+        /* ...and the same underflow from the top: a ship at the very top of a
+         * tall world has a negative offset, which as an unsigned uint16_t is
+         * ~65000 and reads to the min above as "the camera is at the bottom". */
+        check(camera_for(0, tall) == 0 && camera_for(CAM_ANCHOR, tall) == 0 &&
+              camera_for((uint16_t)(CAM_ANCHOR + 1), tall) == 1,
+              "and a ship at the top of the world is camera 0, not 65000 "
+              "(y 0 -> %u, y %d -> %u)", camera_for(0, tall), CAM_ANCHOR,
+              camera_for(CAM_ANCHOR, tall));
+
+        /* The screen height is a hardware constant that sim.h and main.c each
+         * carry a copy of -- main.c's is a build error if the two drift, and
+         * this is what says the number itself is the panel's. */
+        check(SCREEN_H_PX == 144 && CAM_ANCHOR == 48 && CAM_ANCHOR * 3 == SCREEN_H_PX,
+              "the screen is the DMG's 144 px and the anchor is a third of it "
+              "(%d, %d)", SCREEN_H_PX, CAM_ANCHOR);
     }
 
     if (failed) {

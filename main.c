@@ -53,6 +53,18 @@
  * blit_window(): the visible 18 rows come from a world ROW OFFSET, which is
  * the only way a profile taller than the BG map can be drawn at all.  P9 calls
  * it once, at a fixed offset, before any motion exists to confuse it.
+ *
+ * P10 is the CAMERA.  sim.h's camera_for() says which world row the top of the
+ * screen sits on, and SCY is written from it in the vblank -- so the world moves
+ * under a ship that does not, and the tall DESCENT profile becomes a view you
+ * travel through instead of one screen you look at.  Two things follow that are
+ * easy to half-do: the sprite has to have the camera SUBTRACTED from its y, or
+ * the ship slides off the top at exactly the speed the view scrolls (SCY moves
+ * the background and nothing else); and the clamp has to be on the WORLD's
+ * bounds and not the BG map's 256 px, or the scroll stops 600 px short of the
+ * ground while every frame still looks like a working camera.  LANDER is
+ * untouched by either: its world is 104 px, shorter than the screen, so its
+ * camera is pinned at 0 and its view is exactly what P9 drew.
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -67,11 +79,19 @@
  * it and the ship draws as garbage; a build error beats that. */
 typedef char ship_frames_fit[(ROT_STEPS <= GFX_SPRITE_COUNT) ? 1 : -1];
 
-/* The visible window: 20x18 tiles, and the ONLY stride in this file.  The PPU's
- * map is 32 wide, but there is no scroll yet, so the 20x18 at (0,0) is the
- * whole of what a player can see and the whole of what this file writes. */
+/* The visible window: 20x18 tiles, and the ONLY stride in this file.  The 20x18
+ * at (0,0) is the whole of what this file writes and, at SCY 0, the whole of
+ * what a player sees; the camera below slides the view down the BG map as of
+ * P10, and P9's window blit is still what puts tiles under it. */
 #define VIEW_W 20
 #define VIEW_H 18
+
+/* sim.h has its own copy of the screen height -- it carries the camera and has
+ * no gb/gb.h to ask -- and this is the line that keeps the two in step.  A
+ * mismatch moves the camera's bottom clamp off the world's end while the scroll
+ * still looks perfectly reasonable, which is the kind of thing only a build
+ * error catches. */
+typedef char screen_h_matches[(VIEW_H * 8 == SCREEN_H_PX) ? 1 : -1];
 
 /* The DESCENT world's opening screen: the profile row the TOP of the screen
  * sits on, i.e. how far down the world the window has been wound.
@@ -197,6 +217,27 @@ static uint8_t pick;
  * -- the sibling's ordering, where the map write lands in the vblank window
  * rather than being dropped by the PPU mid-scanline. */
 static uint8_t bg[VIEW_W * VIEW_H];
+
+/* The camera: the world row, in PIXELS, that the top of the screen shows -- the
+ * value SCY gets and the value the ship's own draw position is measured
+ * against.  A uint16_t and NOT a byte, which is the whole of "the clamp is on
+ * the world and not on the map": the DESCENT world is ~800 px tall, so the
+ * camera really does reach 664, and SCY is written from its LOW BYTE because
+ * one byte is what the register is.  That wrap is the hardware's, and it is
+ * exactly what P11's circular map exists to make seamless -- a camera held in a
+ * byte instead would clamp the descent at 256 px, and the view would stop with
+ * 600 px of world still below it while every frame looked like a working
+ * camera.
+ *
+ * A file-scope static so probe.p10_camera can read it out of luna.map, the same
+ * way `frame` and `game` are read. */
+static uint16_t cam;
+
+/* The ACTIVE world's height in px, taken from the profile being drawn -- see
+ * world_extent().  Zero until the first field is built, which needs no special
+ * case anywhere: camera_for() answers 0 for a world with no room to scroll, so
+ * the title's frames are at SCY 0 by the same rule as everything else. */
+static uint16_t world_h;
 
 /* The ship.  THE FRACTION BYTES (xf/yf) LIVE IN HERE AND NOT IN ship_step()'s
  * locals: fix_step() carries the sub-pixel remainder between ticks, and a
@@ -328,10 +369,22 @@ static int16_t px_per_frame(int16_t v)
 
 /* ---------------------------------------------------------------- drawing */
 
-/* Put the sprite where the ship is and at the heading it is pointing -- called
- * once per tick in play, always straight from the state so the offset is
- * written down exactly once.  The ship's top-left is (x, y); the OAM bytes are
- * (x + 8, y + 16).
+/* Put the sprite where the ship is on SCREEN and at the heading it is pointing
+ * -- called once per tick in play, always straight from the state so the offset
+ * is written down exactly once.  The ship's top-left is (x, y); the OAM bytes
+ * are (x + 8, y + 16).
+ *
+ * THE CAMERA IS SUBTRACTED FROM Y, and this is the one place it can be
+ * forgotten.  SCY scrolls the BACKGROUND ONLY -- the PPU does not move a sprite
+ * for it -- so a ship drawn at its world y would slide off the top of the
+ * screen at exactly the speed the view scrolled beneath it, while the scroll
+ * itself looked perfectly correct.  Taking cam off is what pins the ship to the
+ * upper third and lets the world go past.  x is untouched: there is no
+ * horizontal camera, the world still wraps in 160 px.
+ *
+ * The subtraction cannot underflow: camera_for() never returns more than
+ * ship_y, so the difference is the ship's distance below the top of the screen
+ * and is at most the screen's height.
  *
  * The FRAME comes out of the same heading byte the thrust VECTOR does, so the
  * nose on screen is always the direction the physics is accelerating: a
@@ -340,7 +393,8 @@ static int16_t px_per_frame(int16_t v)
 static void ship_draw(void)
 {
     set_sprite_tile(SPR_SHIP0, (uint8_t)(SPR_SHIP0 + ship.heading));
-    move_sprite(SPR_SHIP0, (uint8_t)(ship.x + 8), (uint8_t)(ship.y + 16));
+    move_sprite(SPR_SHIP0, (uint8_t)(ship.x + 8),
+                (uint8_t)(ship.y - cam + 16));
 }
 
 /* Off the screen, for the title.  OAM y = 0 is one of the two rows the DMG
@@ -500,12 +554,48 @@ static uint8_t field_open(void)
     return 0;
 }
 
+/* How tall the ACTIVE world is, in px: the bottom of the deepest column, one
+ * tile below its surface row.
+ *
+ * Read out of the profile the level generator committed rather than written
+ * down here, so a regenerated terrain.h cannot leave the camera clamping at a
+ * bound the world no longer has -- the two profiles are 104 px and 808 px tall
+ * and the difference is the whole of what the clamp does.
+ *
+ * terrain[col] is a TILE row (terrain.h), so the `<< 3` is the one place the
+ * units meet here -- the same conversion sim.h's contact test does, and the
+ * same slip to watch for: a `>> 3` would make the world eight times too short
+ * and the camera would clamp almost at once, which still looks like a camera.
+ * The `+ 1` is the tile of ground BENEATH the surface row: a column whose
+ * surface is row 100 has its ground at px 768 and its world runs to 808, which
+ * is what puts the bottom of the screen on the bottom of the world. */
+static uint16_t world_extent(void)
+{
+    uint8_t col, deepest = 0;
+
+    for (col = 0; col < WORLD_COLS; col++)
+        if (terrain[col] > deepest)
+            deepest = terrain[col];
+    return (uint16_t)(((uint16_t)deepest + 1) << 3);
+}
+
 /* The play field's STATIC half, built once when the title is cleared and
  * blitted whole -- see the write below -- because this is the half of the
- * screen that does not move. */
+ * screen that does not move.  world_h is taken here, with the profile it
+ * describes, so the camera's bound and the tiles on the map can never be about
+ * two different worlds. */
 static void build_field(void)
 {
-    blit_window(field_open());
+    /* field_open() FIRST, and not on style: it is what assigns `terrain`, and
+     * world_extent() reads through that pointer.  Taking the height first would
+     * measure the PREVIOUS world -- LANDER, the boot default -- so the DESCENT
+     * would be drawn with the camera clamped to a 104 px world and the view
+     * would never move, which looks exactly like a camera that was never wired
+     * up. */
+    uint8_t row0 = field_open();
+
+    world_h = world_extent();
+    blit_window(row0);
 }
 
 /* The title: the name, the mode it is offering, and how to start.
@@ -738,6 +828,14 @@ void main(void)
              * a gate that is always open. */
             build_hud();
 
+            /* The camera for THIS tick, from the ship the step above just
+             * moved.  A pure function of the state and the world, recomputed
+             * rather than accumulated, so nothing here can drift, a restart
+             * cannot leave the view wound down the world, and there is no
+             * smoothing constant to tune.  cam is what ship_draw() subtracts
+             * and what the tick loop below hands SCY. */
+            cam = camera_for(ship.y, world_h);
+
             /* Drawn from the state, every tick.  A renderer that kept its own
              * copy of the position would drift from the physics and nothing on
              * screen would ever say so; probe.p3_gravity asserts the sprite's
@@ -749,11 +847,28 @@ void main(void)
         wait_vbl_done();
 
         if (game == ST_PLAY) {
-            /* Two rows of twenty tiles, one wait each for the PPU's blanking
-             * window.  The tilemap this lands in is the one the NEXT frame's
-             * reads see, which is the same one-vblank relationship the shadow
-             * OAM has had since P3 -- and the reason probe.p6_hud allows the
-             * screen's numbers to be one tick behind the state's. */
+            /* SCY goes FIRST, and WHERE it goes is this phase's named trap: the
+             * PPU reads the scroll registers as it draws, so a write outside
+             * the blanking window tears the frame -- the top of the picture
+             * showing the old scroll and the bottom the new one.  It belongs
+             * HERE, after the wait above, and NOT in the play branch, which
+             * runs before the wait and would write mid-frame.  Nothing about
+             * the finished screen can tell the two orders apart under an
+             * emulator, so this line's position is the only expression of it.
+             *
+             * The LOW BYTE only.  cam is a uint16_t world offset (see its
+             * declaration) and SCY is one byte, so the scroll wraps at 256 px
+             * and repeats -- which is the hardware's limit and precisely the
+             * wrap P11's circular map is built to make seamless.  Writing the
+             * byte is not a compromise here; it is the reason the map has to
+             * become a ring. */
+            SCY_REG = (uint8_t)cam;
+
+            /* Then two rows of twenty tiles, one wait each for the PPU's
+             * blanking window.  The tilemap this lands in is the one the NEXT
+             * frame's reads see, which is the same one-vblank relationship the
+             * shadow OAM has had since P3 -- and the reason probe.p6_hud allows
+             * the screen's numbers to be one tick behind the state's. */
             set_bkg_tiles(0, 0, VIEW_W, 2, bg);
         }
     }
