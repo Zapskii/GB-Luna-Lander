@@ -46,7 +46,20 @@ LCDC_ON = 0x80                  # bit 7: the display.  While it is set the PPU
 # gfx.h's ids, mirrored here on purpose: mkgfx.py, gfx.h and this file are a
 # three-way contract, and a probe that asked gfx.h for them could not tell a
 # renamed tile from a wrong one.
+T_BLANK = 0
 T_TERRAIN = 1
+T_TERRAIN_TOP = 2
+
+# terrain.h's geometry, mirrored for the same reason: tools/mklevel.py,
+# terrain.h and this file are the second three-way contract.  A probe that read
+# terrain.h could not tell a generator that gives the x2 pad the x1 row from one
+# that gives it the right one.
+#
+# WORLD_COLS is 160 px / 8 px per tile.  NOT a power of two -- 160 is not 256 --
+# which is why the wrap in sim.h is two compares and never an & WORLD_MASK.
+WORLD_COLS = 20
+PAD_COUNT = 2
+PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at
 
 FRAMES = 120                    # how long the tick-rate assertion runs
 
@@ -170,19 +183,95 @@ def p1_boot(g):
     # T_TERRAIN is a flecked tile and not a flat fill: a flat fill and an
     # unloaded bank look identical on a screenshot.
     #
-    # P1 fills the whole map, so the whole view is the terrain tile here.  P2
-    # blits the height profile over it and puts a sky above the surface, and at
-    # that point P2 owns narrowing this to the ground rows; what must not be
-    # weakened is that the generated id is in the map at all.
-    bad = [(x, y) for y in range(VIEW_H) for x in range(VIEW_W)
-           if g.tile(x, y) != T_TERRAIN]
+    # P1 filled the whole map, so the whole view was the terrain tile here.  P2
+    # blits the height profile over it and puts sky above the surface, so "the
+    # whole screen is T_TERRAIN" stopped being true and this is NARROWED to what
+    # survives both -- not deleted, because the one thing it proves that no
+    # other check does is that the generated id reached the map at all.  P2
+    # owns the layout now (see p2_terrain); this keeps the boot-level claim.
+    seen = set()
+    ground = 0
+    for y in range(VIEW_H):
+        for x in range(VIEW_W):
+            t = g.tile(x, y)
+            seen.add(t)
+            if t in (T_TERRAIN, T_TERRAIN_TOP):
+                ground += 1
+    extra = sorted(seen - {T_BLANK, T_TERRAIN, T_TERRAIN_TOP})
+    check(not extra,
+          "the first screen holds only generated tiles -- nothing from an "
+          "unloaded bank (%r is on screen)" % extra)
+    check(ground >= VIEW_W,
+          "and the generated ground is really drawn (%d of %d cells, at least "
+          "one surface tile per column)" % (ground, VIEW_W * VIEW_H))
+
+
+# ------------------------------------------------------------------ P2 -----
+def p2_terrain(g):
+    """The generator's heightmap and the screen agree, column by column.
+
+    Two things can be wrong here while both look entirely plausible: the row
+    blitted can be a different number than terrain[col] (a `<< 3`, an
+    off-by-one, a stale terrain.h the ROM was not rebuilt against), and a pad
+    can be flat in the generator and stepped on the screen.  Neither is visible
+    on a screenshot, which is why this reads the ROM's own arrays.
+    """
+    print("P2 terrain")
+    # A symbol this phase introduces being ABSENT is an assertion failure, not a
+    # harness error: that is exactly the power gate on an older ROM, and it has
+    # to answer 1.
+    if not g.need("terrain", "pads"):
+        return
+
+    g.run(150)                          # let main() run and blit
+
+    # Read the level out of the ROM's OWN memory, not out of terrain.h.  The
+    # question is what the ROM was BUILT with, and a probe that read the header
+    # would pass on a terrain.h that never made it into the ROM.
+    h = g.var("terrain", WORLD_COLS)
+
+    # Every column's surface tile is at that column's terrain row.  This is the
+    # whole target: the renderer and the data agreeing, cell by cell.
+    bad = [(x, h[x], g.tile(x, h[x])) for x in range(WORLD_COLS)
+           if g.tile(x, h[x]) != T_TERRAIN_TOP]
     check(not bad,
-          "the whole first screen holds the terrain tile, id %d (%d of %d "
-          "cells hold something else: %r)"
-          % (T_TERRAIN, len(bad), VIEW_W * VIEW_H, bad[:4]))
+          "every column's surface tile is at its terrain[] row -- col:row:found "
+          "%r" % bad[:5])
+
+    # ...and the rest of the column follows from it: sky above, body below.
+    bad = []
+    for x in range(WORLD_COLS):
+        for y in range(VIEW_H):
+            want = (T_BLANK if y < h[x] else
+                    T_TERRAIN_TOP if y == h[x] else T_TERRAIN)
+            if g.tile(x, y) != want:
+                bad.append((x, y, want, g.tile(x, y)))
+    check(not bad,
+          "the whole column is sky/surface/body exactly as terrain[col] says -- "
+          "col:row:want:found %r" % bad[:5])
+
+    # The pads.  Each is a flat run across its WHOLE width, and sits at the row
+    # its multiplier earns: a x2 pad at the x1 row is flat and wrong, which is
+    # the difference this reads the table for.
+    raw = g.var("pads", PAD_COUNT * 3)
+    for i in range(PAD_COUNT):
+        col0, col1, mult = raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]
+        row = PAD_ROW.get(mult)
+        if row is None or not col0 <= col1 < WORLD_COLS:
+            check(False, "pad %d is malformed: cols %d..%d x%d, expected a span "
+                         "inside 0..%d and a multiplier in %r"
+                         % (i, col0, col1, mult, WORLD_COLS - 1,
+                            sorted(PAD_ROW)))
+            continue
+        span = h[col0:col1 + 1]
+        onscreen = [g.tile(x, h[x]) for x in range(col0, col1 + 1)]
+        check(span == [row] * len(span) and set(onscreen) == {T_TERRAIN_TOP},
+              "pad %d (cols %d..%d, x%d) is flat across its whole width at row "
+              "%d -- terrain %r, screen %r"
+              % (i, col0, col1, mult, row, span, onscreen))
 
 
-CHECKS = [("p1_boot", p1_boot)]
+CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain)]
 
 
 def main(rom, mapfile, only=None):
