@@ -109,7 +109,8 @@ two rows, and everything below them is hidden:
   still flying. X2 over the small pad, X1 over the big one, and **X0 when there
   is no pad under you at all** — which is the spot you do not want to land on.
 - **LANDED X2** — you made it, and that is the pad's multiplier.
-- **CRASHED** — that life is over. START begins a new one.
+- **CRASHED** — that life is over. The ship blows apart where it hit and is
+  gone a moment later. START begins a new one.
 
 VX and VY read 0 until the ship is moving at least a whole pixel a frame, so
 early in a life they may still say 0 while the ship is drifting down slowly.

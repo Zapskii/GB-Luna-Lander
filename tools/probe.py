@@ -1144,6 +1144,93 @@ def p5_landing(g):
     check(s["mult"] == 0,
           "and a crash scores nothing (%d)" % s["mult"])
 
+    # ---- the crash burst -------------------------------------------------
+    # A crash is DRAWN, not merely stated.  The four slots the ship's own frame
+    # lives in -- SPR_SHIP0 + 0..3 -- become one 16x16 burst, tile for tile out
+    # of gfx.h's burst block, centred on the cell the ship died in, and go dark
+    # again when it has run.  Whether four 8x8s read as an explosion is a
+    # question for eyes; what is checkable is the tile ids, the 2x2 layout, the
+    # order the frames play in, and that nothing is left over.
+    #
+    # Sampled EVERY TICK rather than read once at the end: the clock is main.c's
+    # and not this file's, so a check that assumed which tick held which frame
+    # would be writing down a second copy of BOOM_HOLD instead of using it.
+    cam = g.u16("cam")
+    drawn = []
+    for _ in range(BOOM_TICKS + 4):
+        g.run(1)
+        got = [g.oam(slot) for slot in range(BOOM_TILES)]
+        # OAM y == 0 is never drawn -- that is how a slot is hidden -- so a
+        # tick with any of the four dark is not a tick of the burst.  The
+        # frames before the crash land here too: slot 0 holds the ship and
+        # 1..3 are dark, so a stale sample cannot be mistaken for a burst.
+        if all(o[0] != 0 for o in got):
+            drawn.append(got)
+
+    check(bool(drawn),
+          "a crash draws a burst in the ship's own four slots (%d drawn ticks "
+          "of %d)" % (len(drawn), BOOM_TICKS + 4))
+
+    # Everything below needs a drawn tick to be about, and NOTHING below may run
+    # on an empty sample set: `all()` over nothing is True, so a ROM that draws
+    # no burst would quietly collect a row of oks for assertions that never
+    # looked at a single tile -- and the `drawn[0]` reads would raise, which is
+    # the harness's exit 2 and would report a broken CHECK where the honest
+    # answer is a failed one.  This is the opposite call to the deliberate
+    # no-early-return above, and for the opposite reason: there, a broken ROM
+    # still had something to say about landing; here it has nothing to say.
+    if drawn:
+        check(all(q[0][2] >= SPR_BOOM0 and
+                  q[0][2] < SPR_BOOM0 + BOOM_STEPS * BOOM_TILES for q in drawn),
+              "and its tiles come out of the burst block rather than the ship's "
+              "(top-left tiles %r, block 0x%02X..0x%02X)"
+              % ([q[0][2] for q in drawn[:4]], SPR_BOOM0,
+                 SPR_BOOM0 + BOOM_STEPS * BOOM_TILES - 1))
+        check(all(len(set(o[2] for o in q)) == BOOM_TILES and
+                  max(o[2] for o in q) - min(o[2] for o in q) == BOOM_TILES - 1
+                  for q in drawn),
+              "and each frame's four are that frame's own four CONSECUTIVE "
+              "tiles -- no quadrant repeated, none borrowed from its neighbour "
+              "(%r)" % (drawn[0],))
+
+        q = drawn[len(drawn) // 2]
+        check(q[1][0] == q[0][0] and q[1][1] == q[0][1] + SHIP_W and
+              q[2][0] == q[0][0] + SHIP_H and q[2][1] == q[0][1] and
+              q[3][0] == q[0][0] + SHIP_H and q[3][1] == q[0][1] + SHIP_W,
+              "and they meet as a 2x2 of 8x8s -- quadrants at (x, y), (x+8, y), "
+              "(x, y+8), (x+8, y+8) (%r)" % (q,))
+        # CENTRED.  The ship's own sprite is drawn at state + OAM_DX/OAM_DY, so
+        # the burst's top-left is inset from that by half the difference between
+        # the two sizes; a 16x16 whose corner sat at the ship's would cover the
+        # ship's top-left quadrant only and hang off the rest.  Both numbers come
+        # out of the ROM's own x, y and cam, so this is about where the ship IS.
+        inset = BOOM_PX // 2 - SHIP_W // 2
+        check(q[0][1] == s["x"] + OAM_DX - inset and
+              q[0][0] == s["y"] - cam + OAM_DY - inset,
+              "and the burst is CENTRED on the place the ship died, not beside "
+              "it -- its corner %d px inside the ship's own (burst OAM %d,%d; "
+              "the ship's is %d,%d)"
+              % (inset, q[0][1], q[0][0], s["x"] + OAM_DX,
+                 s["y"] - cam + OAM_DY))
+
+        idx = [(q[0][2] - SPR_BOOM0) // BOOM_TILES for q in drawn]
+        check(idx == sorted(idx) and idx[0] == 0 and idx[-1] == BOOM_STEPS - 1,
+              "and it plays through every frame 0..%d in order and never "
+              "backwards (%r)" % (BOOM_STEPS - 1, idx))
+
+    # Ran out.  This assertion alone would pass on a ROM with no burst at all
+    # -- dark slots are what a ROM that draws nothing has -- which is why the
+    # four above it come first and are where the power lives.
+    for _ in range(BOOM_TICKS):
+        g.run(1)
+    check(all(g.oam(slot)[0] == 0 for slot in range(BOOM_TILES)) and
+          g.ship()["state"] == ST_CRASH and
+          g.ship()["verdict"] == LAND_TOO_FAST,
+          "and once it has run there is nothing left of it -- the burst does "
+          "not loop, and the wreck's verdict outlives it (%r, state %d)"
+          % ([g.oam(slot)[0] for slot in range(BOOM_TILES)],
+             g.ship()["state"]))
+
     # ---- START restarts --------------------------------------------------
     # An EDGE, so 8 held frames are one restart -- and the restart landing on
     # the last of them is why the ship is allowed a few ticks of falling below.

@@ -259,6 +259,13 @@ static uint8_t input;
 static uint8_t burning;
 static uint8_t sfx_state = ST_FLY;
 
+/* Ticks since the crash, and the crash burst's whole clock.  It lives here
+ * rather than in sim.h because an explosion is something the screen does: the
+ * physics has no opinion on it, and the one thing it needs -- whether the ship
+ * is wrecked -- is already in the state the tick below reads.  Read by
+ * ship_init (rewind), boom_frame (which frame) and the tick loop (count). */
+static uint8_t boom_t;
+
 /* The family's VRAM lock, as a value tools/probe.py can read back.
  *
  * The PPU locks VRAM while the display is on, so every tile write has to happen
@@ -410,6 +417,12 @@ static void ship_init(void)
     ship.verdict = LAND_SAFE;
     ship.mult = 0;
 
+    /* ...and the burst's clock, which START has to rewind or a life that
+     * followed a crash would open on the previous one's second frame.  The
+     * sprites themselves are not touched here: ship_draw() puts the slots back
+     * from the state on every tick, and this is the state. */
+    boom_t = 0;
+
     /* ...and the ring, which a new life invalidates and nothing else does.  The
      * spawn is at the TOP of the world, so the camera is about to be at row 0 --
      * and the ring is wherever the LAST life left it, up to eighty rows down,
@@ -524,6 +537,84 @@ static int16_t px_per_frame(int16_t v)
 
 /* ---------------------------------------------------------------- drawing */
 
+/* ---- the crash burst, which ship_draw() below is half of -----------------
+ *
+ * FOUR OAM SLOTS, and slot 0 is the SHIP'S OWN: one slot holds one sprite and
+ * it is never two, because the ship is drawn only while it is flying and the
+ * burst only while it is wrecked.  So the field owns SPR_SHIP0 + 0..3 and swaps
+ * what lives in them with the state, and nothing is allocated twice.
+ *
+ * BOOM_HOLD is ticks per frame and BOOM_TICKS the whole animation, both powers
+ * of two so the frame index out of the counter is a shift.  It is counted in
+ * TICKS rather than per drawn frame for the reason the fuel is spent inside
+ * sim.h: a frame that overruns its budget must not run the animation faster
+ * than the thing it is reporting on. */
+#define BOOM_HOLD 4
+#define BOOM_TICKS (BOOM_STEPS * BOOM_HOLD)
+#define BOOM_HALF (BOOM_PX / 2)
+
+/* The counter's ceiling IS the frame ceiling: boom_t stops at BOOM_TICKS, and
+ * BOOM_TICKS / BOOM_HOLD is exactly BOOM_STEPS -- so boom_frame() needs no clamp
+ * of its own, it reads the counter's bound off the counter.  That is arithmetic
+ * spanning two headers, which is exactly what an assert is for: a build error
+ * beats an animation that walks off the end of gfx.h's sprite array.
+ *
+ * Bounded on the way in, so the tick in the loop below can stop counting rather
+ * than wrapping a uint8_t back to the flash: a wrapped counter would have the
+ * wreck exploding again every 64 ticks for as long as the player sat watching. */
+typedef char boom_frames_fit[(BOOM_TICKS / BOOM_HOLD == BOOM_STEPS) ? 1 : -1];
+
+/* The frame to draw, or BOOM_STEPS once the animation is over -- which is the
+ * one value meaning "there is nothing here", and a value rather than a second
+ * flag because the counter already says it. */
+static uint8_t boom_frame(void)
+{
+    return (uint8_t)(boom_t / BOOM_HOLD);
+}
+
+/* 16x16, CENTRED on the ship's own 8x8, so the burst covers the place the ship
+ * died rather than hanging off its top-left corner.  Quadrant i is at
+ * (i & 1, i >> 1) because that is the order gfx.h emits the tiles in -- the same
+ * contract the ship's frame and its thrust vector have, and the one thing here a
+ * comment cannot keep honest.
+ *
+ * ponytail: placed in SCREEN space, so a crash within BOOM_HALF px of the
+ * world's 160 px seam clips its outer edge instead of wrapping round.  Eight
+ * pixels of clip on a four-frame effect is not worth two compares per quadrant. */
+static void boom_draw(uint8_t f)
+{
+    uint8_t i;
+    /* Slot 0's corner: the ship's OWN, pulled back by half the difference
+     * between the two sizes.  DERIVED rather than written as 4, so a bigger
+     * burst in mkgfx.py moves the whole thing instead of leaving it four px up
+     * and to the left of the ship it is reporting on. */
+    uint8_t bx = (uint8_t)(ship.x + 8 - (BOOM_HALF - (SHIP_W >> 1)));
+    uint8_t by = (uint8_t)(ship.y - cam + 16 - (BOOM_HALF - (SHIP_H >> 1)));
+
+    for (i = 0; i < SPR_BOOM_TILES; i++) {
+        set_sprite_tile((uint8_t)(SPR_SHIP0 + i),
+                        (uint8_t)(SPR_BOOM0 + f * SPR_BOOM_TILES + i));
+        move_sprite((uint8_t)(SPR_SHIP0 + i),
+                    (uint8_t)(bx + ((i & 1) << 3)),
+                    (uint8_t)(by + ((i >> 1) << 3)));
+    }
+}
+
+/* Every slot the field draws into, off the screen.  OAM y = 0 is one of the two
+ * rows the DMG never draws (the other is 160), so this hides them rather than
+ * parking them at a corner.  Two callers mean two different things by it and
+ * both are right: the title, where the ship has no position -- it is not
+ * falling behind the menu -- and a burst that has finished, where there is
+ * nothing left to draw.  A sprite left where the spawn put it would sit on top
+ * of the title text. */
+static void field_hide(void)
+{
+    uint8_t i;
+
+    for (i = 0; i < SPR_BOOM_TILES; i++)
+        move_sprite((uint8_t)(SPR_SHIP0 + i), 0, 0);
+}
+
 /* Put the sprite where the ship is on SCREEN and at the heading it is pointing
  * -- called once per tick in play, always straight from the state so the offset
  * is written down exactly once.  The ship's top-left is (x, y); the OAM bytes
@@ -544,22 +635,39 @@ static int16_t px_per_frame(int16_t v)
  * The FRAME comes out of the same heading byte the thrust VECTOR does, so the
  * nose on screen is always the direction the physics is accelerating: a
  * renderer that tracked its own frame would look right while thrusting
- * sideways, and nothing on screen would say so. */
+ * sideways, and nothing on screen would say so.
+ *
+ * The heading is a reading of the d-pad now, so this one line is the whole of
+ * the lean: the nose tips while a direction is held and comes upright the tick
+ * it is let go, with no separate animation because the byte has already
+ * returned to 0 by the time the frame is drawn.
+ *
+ * WRECKED, THE SHIP IS NOT DRAWN AT ALL -- it is the thing that just exploded,
+ * and what stands in its place is a four-frame burst.  The burst has its own
+ * clock (boom_t, ticked in the loop below) rather than a state in sim.h: an
+ * explosion is something the SCREEN does and the physics has no opinion on, and
+ * sim.h's one input is the verdict -- ship.state -- which is already the flag
+ * this branches on. */
 static void ship_draw(void)
 {
+    uint8_t f;
+
+    if (ship.state == ST_CRASH) {
+        f = boom_frame();
+        if (f < BOOM_STEPS)
+            boom_draw(f);
+        else
+            field_hide();       /* the burst has run out; nothing is left of it */
+        return;
+    }
+
+    /* Flying or landed: the ship, and the slots the burst may have left behind.
+     * field_hide() clears slot 0 as well and the two lines below take it
+     * straight back, because the ship's slot IS the burst's top-left quadrant. */
+    field_hide();
     set_sprite_tile(SPR_SHIP0, (uint8_t)(SPR_SHIP0 + ship.heading));
     move_sprite(SPR_SHIP0, (uint8_t)(ship.x + 8),
                 (uint8_t)(ship.y - cam + 16));
-}
-
-/* Off the screen, for the title.  OAM y = 0 is one of the two rows the DMG
- * never draws (the other is 160), so this hides the sprite rather than parking
- * it at a corner: the ship has no position on the title -- it is not falling
- * behind it -- and a sprite left where the spawn put it would sit on top of the
- * title text. */
-static void ship_hide(void)
-{
-    move_sprite(SPR_SHIP0, 0, 0);
 }
 
 /* Blank every cell of the buffer.  T_BLANK is the paper tile, so this is also
@@ -1030,7 +1138,7 @@ void main(void)
      * add it, so the +8/+16 is the caller's job in ship_draw() -- leave it out
      * and the ship flies eight pixels left and sixteen above where the physics
      * says it is, which is a plausible-looking bug with no other symptom. */
-    ship_hide();
+    field_hide();
 
     SHOW_BKG;
     SHOW_SPRITES;
@@ -1102,6 +1210,13 @@ void main(void)
             pressed &= (uint8_t)~J_SELECT;
             game = ST_TITLE;
             SCY_REG = 0;
+            /* ...and the field's sprites off the screen with it.  A sprite is
+             * drawn OVER the background whatever it is, so a ship -- or a wreck
+             * mid-burst, which is the louder of the two -- left on the field
+             * would sit on top of the title the four lines below are about to
+             * build.  ship_draw() is only reached from the play branch, so
+             * nothing else would take it away again. */
+            field_hide();
             build_title();
             set_bkg_tiles(0, 0, VIEW_W, VIEW_H, bg);
             set_win_tiles(0, 0, VIEW_W, 2, bg);
@@ -1183,6 +1298,15 @@ void main(void)
              * any dt accumulator, because wait_vbl_done() below already puts
              * the loop at one iteration per ~16.7 ms frame. */
             ship_step(&ship, input);
+
+            /* The burst's clock, and it starts on the tick the step above wrecked
+             * the ship rather than a tick later -- the state it reads is the one
+             * that step just wrote.  BOUNDED: it stops at BOOM_TICKS instead of
+             * running on, because a uint8_t that wrapped would have the wreck
+             * exploding again every 64 ticks for as long as the player left it.
+             * ship_init() is what rewinds it, so a new life opens on frame 0. */
+            if (ship.state == ST_CRASH && boom_t < BOOM_TICKS)
+                boom_t++;
 
             /* The camera for THIS tick, from the ship the step above just
              * moved.  A pure function of the state and the world, recomputed

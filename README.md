@@ -89,6 +89,14 @@ the same style Protector's `human_fall_step` uses, so "just barely safe" and
 "just barely fatal" are both pinned — the host tests straddle every one of them
 from both sides.
 
+A crash is drawn and not merely reported. The ship's own sprite slot plus the
+three beside it — the only four the field uses — become a 16x16, four-frame
+burst centred on the cell the ship died in, and go dark when it has run: the
+wreck is not left standing, because the thing that landed is gone. The frame
+comes off the same tick clock the physics runs on rather than off a drawn frame,
+so a frame that overruns its budget cannot animate the burst faster than the
+thing it is reporting on.
+
 Pad multipliers come out of `terrain.h`, not out of the renderer:
 
 | Pad | Columns | Score |

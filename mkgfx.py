@@ -240,7 +240,119 @@ def render_ship(step):
     return rows
 
 
-SPRITES = [enc(render_ship(h)) for h in range(ROT_STEPS)]
+SHIP_SPRITES = [enc(render_ship(h)) for h in range(ROT_STEPS)]
+
+# -------------------------------------------------------------- the burst
+# THE CRASH EXPLOSION, and it is a SPRITE and not a BG stamp: a crash can happen
+# at any column of a world that wraps and at any camera offset, so a sprite is
+# placed in SCREEN space by move_sprite() -- nothing to write into a map, and
+# nothing to clean up when the burst is over but four OAM slots.
+#
+# FOUR FRAMES OF 16x16.  Typed in by hand, unlike the ship's headings: a
+# rotation has angles that cannot be drawn at 8x8 without aliasing, but a burst
+# has no geometry to get wrong -- each frame IS the shape, and the frames are
+# the animation.  The ink thins from the flash to the specks, which is what
+# makes it read as a blast rather than as four drawings in a row.
+#
+# EACH FRAME IS FOUR 8x8 QUADRANTS, top-left, top-right, bottom-left,
+# bottom-right, because SPRITES_8x8 draws one tile per OAM slot and a 16x16 is
+# four slots.  That order is main.c's `(i & 1, i >> 1)` and the check below is
+# what stops the two drifting apart.
+BOOM_STEPS = 4
+BOOM_ROWS = 16                  # px a side, so 2x2 tiles of 8
+BOOM_QUADRANTS = 4              # tiles per frame; the emitted tile order
+
+BOOM = [
+    # 0 - the flash: the ship is gone and this is what is left of it
+    ["................",
+     "................",
+     ".....######.....",
+     "....########....",
+     "...##########...",
+     "..############..",
+     "..############..",
+     "..############..",
+     "..############..",
+     "..############..",
+     "...##########...",
+     "....########....",
+     ".....######.....",
+     "................",
+     "................",
+     "................"],
+    # 1 - it blows outward into a ring, and the ring is already coming apart
+    ["................",
+     "...##......##...",
+     "..####....####..",
+     "..#..##..##..#..",
+     ".##...####...##.",
+     ".#..#.####.#..#.",
+     ".##..######..##.",
+     ".#..########..#.",
+     ".#..########..#.",
+     ".##..######..##.",
+     ".#..#.####.#..#.",
+     ".##...####...##.",
+     "..#..##..##..#..",
+     "..####....####..",
+     "...##......##...",
+     "................"],
+    # 2 - shreds, thrown wide
+    ["..#..........#..",
+     "....#......#....",
+     "..#...#..#...#..",
+     ".......##.......",
+     "...#..#..#..#...",
+     "......#..#......",
+     "..#...#..#......",
+     "....#......#....",
+     "..#..........#..",
+     ".....#....#.....",
+     "................",
+     "..#..........#..",
+     ".....#....#.....",
+     "..#........#....",
+     "................",
+     "................"],
+    # 3 - specks, and the last of it
+    ["................",
+     "...#........#...",
+     "........#.......",
+     ".....#..........",
+     "..........#.....",
+     "...#............",
+     "........#.......",
+     "....#........#..",
+     "..........#.....",
+     ".......#........",
+     "..##............",
+     "......#.....#...",
+     ".....#..........",
+     ".........#......",
+     "................",
+     "................"],
+]
+
+
+def boom_tiles(rows):
+    """One 16x16 frame -> its four 8x8 quadrants as tile bytes, in the order
+    main.c places them: (0,0), (8,0), (0,8), (8,8)."""
+    assert len(rows) == BOOM_ROWS, "frame is %d rows, not %d" % (len(rows), BOOM_ROWS)
+    for r in rows:
+        assert len(r) == BOOM_ROWS, "row %r is %d wide, not %d" % (r, len(r), BOOM_ROWS)
+    half = BOOM_ROWS // 2
+    quads = [(0, 0), (half, 0), (0, half), (half, half)]
+    return [enc([rows[y][x:x + half] for y in range(dy, dy + half)])
+            for (x, dy) in quads]
+
+
+BOOM_SPRITES = [t for f in BOOM for t in boom_tiles(f)]
+
+# The whole OBJ array main.c hands to set_sprite_data(): the ship's headings
+# first, then the burst, so SPR_SHIP0 + heading and SPR_BOOM0 + frame*4 + q are
+# the two id bases and neither moves when the other grows.
+SPR_BOOM0 = len(SHIP_SPRITES)
+SPRITES = SHIP_SPRITES + BOOM_SPRITES
 
 # ------------------------------------------------------------- self-check
 # NTILES is the id space, and it is written out rather than taken from
@@ -267,9 +379,9 @@ assert _IDS["T_STAR0"] == 3, "mklevel.py's STAR_TILE0 says 3, this says %d" % _I
 # screenshot: a "rotation" that stopped rotating (sixteen copies of one frame),
 # and a frame rendered at a different angle than the thrust vector tables.h
 # gives the same index -- which thrusts the ship sideways while it looks right.
-assert len(SPRITES) == ROT_STEPS, \
-    "expected %d ship headings, got %d" % (ROT_STEPS, len(SPRITES))
-assert len(set(tuple(s) for s in SPRITES)) == ROT_STEPS, \
+assert len(SHIP_SPRITES) == ROT_STEPS, \
+    "expected %d ship headings, got %d" % (ROT_STEPS, len(SHIP_SPRITES))
+assert len(set(tuple(s) for s in SHIP_SPRITES)) == ROT_STEPS, \
     "the ship headings are not all distinct -- some step renders a repeat"
 for h in range(ROT_STEPS):
     rows = render_ship(h)
@@ -290,6 +402,32 @@ for h in range(ROT_STEPS):
     # pairing can actually have.
     assert cos_back < -0.95, \
         "heading %d does not point where it says (centroid cos %.2f)" % (h, cos_back)
+
+# The burst.  A frame that is a different SIZE from the others, or a quadrant
+# split that dropped a row, still encodes and still draws -- as a 16x16 that is
+# quietly assembled wrong, which is a screenshot bug nobody would trace back
+# here.  The width and height are asserted in boom_tiles(); what is left for
+# this block is the tile count and the thing the animation IS.
+assert len(BOOM) == BOOM_STEPS, \
+    "expected %d burst frames, got %d" % (BOOM_STEPS, len(BOOM))
+assert len(BOOM_SPRITES) == BOOM_STEPS * BOOM_QUADRANTS, \
+    "the burst is %d tiles, not %d frames x %d quadrants" \
+    % (len(BOOM_SPRITES), BOOM_STEPS, BOOM_QUADRANTS)
+assert SPR_BOOM0 == ROT_STEPS, \
+    "the burst starts at tile %d, and the ship's headings run to %d" \
+    % (SPR_BOOM0, ROT_STEPS - 1)
+assert len(set(tuple(t) for t in BOOM_SPRITES)) > 1, \
+    "every quadrant of the burst is the same tile"
+_ink = [sum(row.count("#") for row in f) for f in BOOM]
+for i, n in enumerate(_ink):
+    assert n, "burst frame %d is empty -- an invisible frame in the animation" % i
+# It THINS: the flash is the heaviest frame and the specks the lightest, so a
+# burst whose frames got denser -- a generator reading them backwards, or a
+# last frame left as a copy of the first -- is caught here rather than as an
+# explosion that seems to reassemble itself.  The margin is one pixel, so
+# redrawing the art is free; reversing the order is not.
+assert _ink[0] == max(_ink) and _ink[-1] == min(_ink) and _ink[0] > _ink[-1], \
+    "the burst does not thin from the flash to the specks (%r)" % _ink
 
 # ----------------------------------------------------------------- output
 lines = [
@@ -315,9 +453,20 @@ lines += [
     " * sprite frame i and thrust vector i point the same way, which is the whole",
     " * pairing.  Colour 0 is a HOLE on a sprite, so the ship's background is",
     " * transparent here - which is why sprites are a second array and not a",
-    " * slice of gfx_tiles. */",
+    " * slice of gfx_tiles.",
+    " *",
+    " * THEN THE BURST, at SPR_BOOM0: BOOM_STEPS frames of 16x16, each frame four",
+    " * 8x8 quadrants in tile order top-left, top-right, bottom-left, bottom-right,",
+    " * because SPRITES_8x8 draws one tile per OAM slot.  Frame f's top-left is",
+    " * SPR_BOOM0 + f * SPR_BOOM_TILES, and main.c has to place them in the same",
+    " * order it is written here -- the two are the same contract the ship's",
+    " * heading and its thrust vector have. */",
     "#define GFX_SPRITE_COUNT %d" % len(SPRITES),
     "#define SPR_SHIP0 %d" % 0,
+    "#define SPR_BOOM0 %d" % SPR_BOOM0,
+    "#define SPR_BOOM_TILES %d" % BOOM_QUADRANTS,
+    "#define BOOM_STEPS %d" % BOOM_STEPS,
+    "#define BOOM_PX %d" % BOOM_ROWS,
     "",
     "static const uint8_t gfx_tiles[] = {",
 ]
