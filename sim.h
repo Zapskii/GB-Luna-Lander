@@ -98,16 +98,50 @@ typedef char thrust_fits_int16[(THRUST <= 127) ? 1 : -1];
  * TERRAIN_MAX_TILES exists to avoid.  A CALIBRATION KNOB, P5's. */
 #define FUEL_START 600
 
+/* ------------------------------------------------------------ the thruster
+ * The sideways one: lateral acceleration per tick while a direction is held,
+ * in n/256 px/frame^2, and the friction that takes it back out.  Both are
+ * POWERS OF TWO for the reason GRAV and THRUST are -- SDCC turns a power-of-two
+ * scale into a shift and anything else into __mulint.
+ *
+ * THE PAIR IS A RATIO, not two separate knobs.  At 16/16 a held direction adds
+ * 16/256 px/frame every tick and releasing takes the same amount back out, so a
+ * strafe accelerates and settles over the same number of ticks: holding RIGHT
+ * for 20 ticks ends at 320 (1.25 px/frame) and coasts about 12 px to a stop.
+ * DRAG applies ONLY while the thruster is off -- applied always it would cancel
+ * STRAFE exactly and a held direction would do nothing to vx.
+ *
+ * CALIBRATION KNOBS, both: how far a strafe carries is feel.  The constraint
+ * between them is the landing rule -- DRAG has to bring a released strafe back
+ * inside SAFE_VX_MAX in a few ticks, or a player who lets go a moment too late
+ * can never land.  At 16 that takes 16 ticks from a 20-tick hold. */
+#define STRAFE 16
+#define DRAG   16
+
+/* How far the nose leans while a direction is held, in heading steps -- and it
+ * is a LEAN, not a turn: the ship SNAPS BACK to heading 0 the tick the
+ * direction is released, so LEAN_STEPS is the only heading a strafe can
+ * produce.  (Index i is 22.5 * i degrees CLOCKWISE from up, tables.h, so
+ * leaning right is the positive one and leaning left is ROT_STEPS - this.)
+ *
+ * It has to stay ABOVE SAFE_TILT.  Landing while still holding a direction is
+ * TILTED, and a lean inside the tolerance would make "let go before you touch
+ * down" free -- which is the one bit of discipline the strafe is supposed to
+ * cost.  At 1 the sprite barely reads as tilted in the hand either. */
+#define LEAN_STEPS 2
+
 /* What this tick's buttons mean, decoded by main.c.  sim.h cannot see
- * J_UP/J_A/J_B -- it has no gb/gb.h -- and the decode is a wiring question
+ * J_LEFT/J_A/J_B -- it has no gb/gb.h -- and the decode is a wiring question
  * that belongs next to the joypad read anyway.
  *
- * THRUST is a LEVEL: it reads the held keys, so holding it keeps burning.
- * ROT_L/ROT_R are EDGES: one tick per press, or holding B would spin the ship
- * through a whole revolution. */
-#define SHIP_THRUST 0x01
-#define SHIP_ROT_L  0x02
-#define SHIP_ROT_R  0x04
+ * ALL THREE ARE LEVELS: they read the HELD keys, so holding one keeps doing
+ * whatever it does.  The two directions were not always -- they were rotation
+ * EDGES, one 22.5 deg step per press -- and the difference is visible in
+ * main.c's decode, which reads `keys` for these and `pressed` for START and
+ * SELECT, the two buttons still worth an edge. */
+#define SHIP_THRUST   0x01
+#define SHIP_STRAFE_L 0x02
+#define SHIP_STRAFE_R 0x04
 
 /* ----------------------------------------------------------------- world */
 
@@ -288,7 +322,11 @@ static uint8_t pad_mult(uint8_t col)
  * quietly shipping a game where nothing can crash.
  *
  * All three are in 8.8 px/frame like every other velocity here, and all three
- * are powers of two so no comparison costs a __mulint to set up. */
+ * are powers of two so no comparison costs a __mulint to set up.
+ *
+ * SAFE_VX_MAX is the STRAFE's target as well as the landing rule: it is the
+ * speed DRAG has to bring a released strafe back under, which is what makes
+ * "stop pushing before you arrive" the move the strafe costs you. */
 #define SAFE_VY_MAX 128     /* 0.5 px/frame down; faster than this is TOO_FAST */
 #define SAFE_VX_MAX  64     /* 0.25 px/frame sideways; more is DRIFTING      */
 #define SAFE_TILT     1     /* one 22.5 deg step off nose up; more is TILTED */
@@ -328,7 +366,7 @@ static uint8_t classify_landing(const Ship *s, uint8_t col)
     return LAND_SAFE;
 }
 
-/* One tick of the ship: rotate, burn, thrust, fall, and -- P5 -- land.
+/* One tick of the ship: lean and strafe, burn, thrust, fall, and -- P5 -- land.
  *
  * Fuel burns HERE and not in main.c's tick loop: the economy is part of the
  * step, so a frame that overruns its budget cannot quietly buy the player
@@ -352,13 +390,30 @@ static void ship_step(Ship *s, uint8_t in)
     if (s->state != ST_FLY)
         return;
 
-    /* `& (ROT_STEPS - 1)` and not `% ROT_STEPS`: ROT_STEPS is a power of two
-     * (tables.h says so), and a modulo through SDCC is __divsint, 231 bytes
-     * for a wrap that costs one AND. */
-    if (in & SHIP_ROT_L)
-        s->heading = (uint8_t)((s->heading + ROT_STEPS - 1) & (ROT_STEPS - 1));
-    if (in & SHIP_ROT_R)
-        s->heading = (uint8_t)((s->heading + 1) & (ROT_STEPS - 1));
+    /* THE LEAN, and THE SIDEWAYS THRUSTER -- one thing and not two.  Holding a
+     * direction pushes the ship that way and leans the nose into the push;
+     * RELEASING SNAPS THE NOSE BACK UPRIGHT.  The heading is ASSIGNED here and
+     * never stepped, because it is a reading of the input and not a turn the
+     * player accumulates: the only values it can take are 0, LEAN_STEPS and
+     * ROT_STEPS - LEAN_STEPS, which is why the `& (ROT_STEPS - 1)` wrap the old
+     * rotation needed has gone with it.
+     *
+     * GATED ON FUEL with the main engine below, because an empty tank is NO
+     * thrust and a lean that moves nothing is a lie about what the sprite is
+     * showing.  The friction further down is NOT gated: friction is not thrust.
+     *
+     * Pressing both directions reads as RIGHT -- one `else`, not a rule. */
+    s->heading = 0;
+    if ((in & (SHIP_STRAFE_L | SHIP_STRAFE_R)) && s->fuel) {
+        s->fuel = (s->fuel > FUEL_BURN) ? (uint16_t)(s->fuel - FUEL_BURN) : 0;
+        if (in & SHIP_STRAFE_R) {
+            s->vx += STRAFE;
+            s->heading = (uint8_t)LEAN_STEPS;
+        } else {
+            s->vx -= STRAFE;
+            s->heading = (uint8_t)(ROT_STEPS - LEAN_STEPS);
+        }
+    }
 
     s->vy += GRAV;
 
@@ -376,6 +431,19 @@ static void ship_step(Ship *s, uint8_t in)
          * the thrust and double nothing else. */
         s->vx += (int16_t)((THRUST * tx) >> 8);
         s->vy += (int16_t)((THRUST * ty) >> 8);
+    }
+
+    /* FRICTION, and only while the sideways thruster is OFF -- applied always
+     * it would cancel STRAFE in the block above and a held direction would do
+     * nothing to vx at all.  A constant take-off and not a fraction of the
+     * speed, so the settle is a fixed number of ticks whatever the ship was
+     * doing; clamped at zero rather than run through it, because a vx that
+     * overshoots drags the ship backwards for no reason the player gave it. */
+    if (!(in & (SHIP_STRAFE_L | SHIP_STRAFE_R))) {
+        if (s->vx > 0)
+            s->vx = (s->vx > DRAG) ? (int16_t)(s->vx - DRAG) : 0;
+        else if (s->vx < 0)
+            s->vx = (s->vx < -(int16_t)DRAG) ? (int16_t)(s->vx + DRAG) : 0;
     }
 
     /* The wrap, and it is TWO COMPARES: 160 px is not 256, and an

@@ -20,8 +20,8 @@
  * being told.
  *
  * P4 hands the ship a pilot: the JOYPAD DECODE -- held keys into sim.h's
- * SHIP_THRUST, edges into SHIP_ROT_L/R -- and one sprite tile picked from the
- * heading byte.  The rotation, the thrust vector, the burn and the gravity all
+ * SHIP_THRUST and SHIP_STRAFE_L/R -- and one sprite tile picked from the
+ * heading byte.  The lean, the thrust vector, the burn and the gravity all
  * live in sim.h; what is left here is the wiring.
  *
  * P5 is the landing: a spawn that can be repeated, a START that repeats it, and
@@ -215,12 +215,13 @@ static uint16_t frame;
 
 /* This tick's joypad poll, the one before it, and the edge between them.
  *
- * `pressed` is `keys & ~prev_keys`, and the split matters: START/LEFT/RIGHT/
- * SELECT are ONE-SHOTS and read `pressed`, so holding LEFT steps the heading
- * once instead of spinning the ship a whole revolution, while thrust reads
- * `keys` so a held button keeps burning fuel.  GBDK's joypad() is a raw read of
- * the current state -- it does not do this for you -- so `prev_keys` has to be
- * in main.c's storage, next to `keys`, and nowhere else. */
+ * `pressed` is `keys & ~prev_keys`, and the split matters: START and SELECT are
+ * ONE-SHOTS and read `pressed`, so holding SELECT does not flip the mode every
+ * tick, while thrust and the two directions read `keys` -- all three are held
+ * levels that keep doing whatever they do for as long as the button is down.
+ * GBDK's joypad() is a raw read of the current state -- it does not do this for
+ * you -- so `prev_keys` has to be in main.c's storage, next to `keys`, and
+ * nowhere else. */
 static uint8_t keys, prev_keys, pressed;
 
 /* This tick's decoded pad.  A file-scope static and NOT a local of main()'s,
@@ -1138,38 +1139,45 @@ void main(void)
         }
 
         if (game == ST_PLAY) {
-            /* Decode the pad into sim.h's flags.  A and B are thrust (held:
-             * `keys`), LEFT and RIGHT are the two rotation steps (one-shot:
-             * `pressed`) -- LEFT turns the nose one step anticlockwise and
-             * RIGHT clockwise, so they undo each other exactly.
+            /* Decode the pad into sim.h's flags.  A and B are the main engine,
+             * LEFT and RIGHT are the sideways thruster, and ALL THREE READ
+             * `keys` -- there is not a one-shot among them any more.  Holding a
+             * direction strafes and leans the nose into it; letting go snaps
+             * the nose back upright and the friction in ship_step() brings the
+             * drift to a stop.
              *
-             * THE ROTATION USED TO BE A AND B and it moved here for the hand,
-             * not for the code: thrust is the one control that has to be HELD
-             * while the ship is steered, and a d-pad UP is the one direction a
-             * thumb cannot hold and still reach the other three.  The DMG has
-             * no shoulder buttons -- J_LFT/J_RGT do not exist in gb/gb.h, there
-             * are exactly eight bits on the register -- so "the two face
-             * buttons" is the only pair left to put a held control on, and LEFT
-             * /RIGHT is where a one-shot pair belongs once they are free. */
+             * THE SIDEWAYS MOVEMENT USED TO BE A ROTATION and it moved here for
+             * the hand, not for the code: a ship you have to turn before you
+             * can correct a drift is a ship that drifts while you turn it, and
+             * on a 160 px world there is no room for that.  A held strafe is
+             * one control doing the correction and the aiming at once.
+             *
+             * The DMG has no shoulder buttons -- J_LFT/J_RGT do not exist in
+             * gb/gb.h, there are exactly eight bits on the register -- so the
+             * two face buttons stay the main engine and the d-pad keeps the
+             * two directions. */
             input = 0;
             if (keys & (J_A | J_B))     input |= SHIP_THRUST;
-            if (pressed & J_LEFT)       input |= SHIP_ROT_L;
-            if (pressed & J_RIGHT)      input |= SHIP_ROT_R;
+            if (keys & J_LEFT)          input |= SHIP_STRAFE_L;
+            if (keys & J_RIGHT)         input |= SHIP_STRAFE_R;
 
             /* START restarts the life -- after a crash, after a landing, or
              * mid-flight if the player simply wants another go.  An EDGE and
-             * not a level, like LEFT and RIGHT: read `keys` here and holding
-             * START would reset the ship on every tick, so it would never fall
-             * at all and the game would look frozen rather than restarted.  It
-             * is also what seats a fresh ship on the tick the title is cleared. */
+             * not a level, like SELECT: read `keys` here and holding START
+             * would reset the ship on every tick, so it would never fall at all
+             * and the game would look frozen rather than restarted.  It is also
+             * what seats a fresh ship on the tick the title is cleared. */
             if (pressed & J_START)
                 ship_init();
 
             /* Does this tick burn?  The pad AND the tank, read here because
              * ship_step() below is what spends the fuel -- and the state,
-             * because UP held over a crashed ship is not a burn either. */
-            burning = (uint8_t)((ship.state == ST_FLY &&
-                                 (input & SHIP_THRUST) && ship.fuel) ? 1 : 0);
+             * because a button held over a crashed ship is not a burn either.
+             * Either thruster counts: the strafe burns like the main engine, so
+             * it is the same noise coming out of the same tank. */
+            burning = (uint8_t)((ship.state == ST_FLY && ship.fuel &&
+                                 (input & (SHIP_THRUST | SHIP_STRAFE_L |
+                                           SHIP_STRAFE_R))) ? 1 : 0);
 
             /* One iteration IS one tick.  Physics runs once here, unpaced by
              * any dt accumulator, because wait_vbl_done() below already puts

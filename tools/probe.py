@@ -241,6 +241,29 @@ FUEL_BURN = 1
 ROT_STEPS = 16
 SPR_SHIP0 = 0
 
+# sim.h's sideways thruster, mirrored for the same reason as the knobs above.
+# STRAFE is what a held d-pad direction adds to vx each tick and DRAG is what
+# letting go takes back out of it; both are asserted here as IDENTITIES, so a
+# retune of either follows in the check's arithmetic instead of failing as a
+# complaint about the game.  LEAN_STEPS is the nose's tilt while a direction is
+# held -- not a step the stick took, a lean it is holding.
+STRAFE = 16
+DRAG = 16
+LEAN_STEPS = 2
+
+# gfx.h's crash burst and main.c's clock for it, mirrored for the same reason as
+# the tile ids: SPR_BOOM0 is the burst's first sprite tile, BOOM_TILES is how
+# many tiles make one 16x16 frame (a 2x2 of 8x8 quadrants), BOOM_STEPS is how
+# many frames it has and BOOM_HOLD how many ticks each one is held.  The tiles
+# are asserted here as the exact four a frame owns, so a burst drawn from the
+# wrong base or in the wrong quadrant order fails rather than merely looking off.
+SPR_BOOM0 = 16
+BOOM_TILES = 4
+BOOM_STEPS = 4
+BOOM_HOLD = 4
+BOOM_TICKS = BOOM_STEPS * BOOM_HOLD
+BOOM_PX = 16
+
 # The APU's registers, mirrored from gb/gb.h for the same reason the tile ids
 # are: this file writes down WHAT it expects, so a ROM that powers the APU on
 # and routes it can be told from one that does -- or from one that only looks
@@ -932,42 +955,101 @@ def p4_thrust(g):
           "by exactly GRAV * %d == %d and leave vx at %d (vy %d -> %d)"
           % (k, k, GRAV * k, f["vx"], f["vy"], h["vy"]))
 
-    # ---- the stick: one press, one step, and the frame follows it ---------
-    # LEFT and RIGHT are EDGES, so they are held for several frames on purpose: an
-    # edge that fired once per frame would spin the ship through a whole
-    # revolution on one press, and holding is the only way to tell from the
-    # outside.  The heading is 0 here -- nothing above pressed LEFT or RIGHT.
-    h0 = g.ship()["heading"]
-    g.run(4, "R")
-    h1 = g.ship()["heading"]
-    check(h1 == (h0 + 1) % ROT_STEPS,
-          "four frames of held RIGHT are ONE rotation step, not four (heading "
-          "%d -> %d)" % (h0, h1))
+    # ---- the stick: a held lean, a sideways push, and friction ------------
+    # A FRESH LIFE FIRST, and it is not tidiness: the tank above is dry, and the
+    # sideways thruster is under exactly the same fuel gate as the engine -- so
+    # a strafe flown here would be a check on the gate, and would pass on a ROM
+    # whose sideways push did not exist at all.  START, and the ship is back
+    # above the pad with a full tank.
+    g.run(8, "S")
+    g.run(2)
+    h0 = g.ship()
+    check(h0["heading"] == 0 and h0["fuel"] == FUEL_START and
+          h0["state"] == ST_FLY,
+          "START seats a fresh ship, upright and fuelled (heading %d, fuel %d, "
+          "state %d)" % (h0["heading"], h0["fuel"], h0["state"]))
+
+    # HELD, not an EDGE, and that is the whole difference from the stick this
+    # replaces: the nose LEANS into the push and stays leaning for as long as
+    # the direction is down.  The fuel is counted in the same breath because the
+    # sideways thruster burns at the engine's own rate -- sideways motion is not
+    # free, or the tank stops being the whole clock.
+    g.run(2, "R")
+    h1 = g.ship()
+    check(h1["heading"] == LEAN_STEPS and h1["fuel"] == h0["fuel"] - 2 * FUEL_BURN,
+          "held RIGHT leans the nose to %d and holds it there, at %d unit a "
+          "tick like the engine (heading %d, fuel %d -> %d)"
+          % (LEAN_STEPS, FUEL_BURN, h1["heading"], h0["fuel"], h1["fuel"]))
 
     # One vblank of slack, and no more: set_sprite_tile writes GBDK's SHADOW
     # OAM, which only reaches the PPU's 0xFE00 on the next vblank.  The slack
     # is in the phase, never in the value -- a ship drawn on frame 0 whatever
     # its heading fails here.
+    g.run(3, "R")
+    check(g.oam()[2] == SPR_SHIP0 + LEAN_STEPS,
+          "and the sprite leans with it (heading %d draws tile 0x%02X, expected "
+          "0x%02X)" % (LEAN_STEPS, g.oam()[2], SPR_SHIP0 + LEAN_STEPS))
+
+    # ACCELERATION, and both axes at once on purpose: vx climbs by exactly
+    # STRAFE a tick -- no gravity term leaking into the sideways axis -- and vy
+    # falls by exactly GRAV a tick, which is what makes this a sideways PUSH
+    # rather than a second way of holding the ship up.
+    a = g.ship()
+    g.run(k, "R")
+    b = g.ship()
+    check(b["vx"] - a["vx"] == STRAFE * k and b["vy"] - a["vy"] == GRAV * k,
+          "held RIGHT accelerates sideways at exactly STRAFE a tick and leaves "
+          "the vertical to gravity -- %d ticks add %d to vx and %d to vy "
+          "(vx %d -> %d, vy %d -> %d)"
+          % (k, STRAFE * k, GRAV * k, a["vx"], b["vx"], a["vy"], b["vy"]))
+
+    # FRICTION, and the release in the same breath: letting go takes DRAG back
+    # out of vx a tick AND stands the nose up on that very tick.  "The icon
+    # returns to upright" is the heading, and that is the half of it a state
+    # read can prove.
+    c = g.ship()
+    g.run(k)
+    d = g.ship()
+    check(c["vx"] - d["vx"] == DRAG * k and d["heading"] == 0,
+          "and letting go takes exactly DRAG a tick back out and stands the nose "
+          "up on the same tick (vx %d -> %d, heading %d)"
+          % (c["vx"], d["vx"], d["heading"]))
     g.run(3)
-    check(g.oam()[2] == SPR_SHIP0 + h1,
-          "and the sprite frame follows the heading (heading %d draws tile "
-          "0x%02X, expected 0x%02X)" % (h1, g.oam()[2], SPR_SHIP0 + h1))
+    check(g.oam()[2] == SPR_SHIP0,
+          "which the sprite follows back to the upright frame (tile 0x%02X, "
+          "expected 0x%02X)" % (g.oam()[2], SPR_SHIP0))
 
-    g.run(4, "L")
-    check(g.ship()["heading"] == h0,
-          "LEFT steps the other way, back to where we started (heading %d)"
-          % g.ship()["heading"])
+    # LEFT is the same thruster the other way, and its lean is the FAR END of
+    # the heading table rather than a negative index: the frame drawn is
+    # SPR_SHIP0 + heading, so an index of -2 would draw the tile two before the
+    # ship's block -- the terrain, not a ship.
+    a = g.ship()
+    g.run(k, "L")
+    b = g.ship()
+    check(b["vx"] - a["vx"] == -STRAFE * k and
+          b["heading"] == ROT_STEPS - LEAN_STEPS,
+          "LEFT mirrors it -- %d ticks at -STRAFE a tick and the nose off the "
+          "far end of the table (vx %d -> %d, heading %d, expected %d)"
+          % (k, a["vx"], b["vx"], b["heading"], ROT_STEPS - LEAN_STEPS))
 
-    # A button-free tick between two presses, and it is not optional: run()
-    # holds the button for every frame it is given and releases it after the
-    # tick, so the ROM's prev_keys is still A when the next run starts and the
-    # following press is not an EDGE.  Two presses back to back would read as
-    # one and this assertion would fail on a perfectly good ROM.
-    g.run(2)
-    g.run(4, "L")
-    check(g.ship()["heading"] == (h0 - 1) % ROT_STEPS,
-          "and keeps going the other way past it, wrapping rather than "
-          "underflowing (heading %d)" % g.ship()["heading"])
+    # And it comes to REST rather than to a shiver: friction comes off in DRAG
+    # steps and the last of it is CLAMPED to zero, so a ship left alone reads 0
+    # and stays 0.  Without the clamp the residue under one DRAG would be a
+    # permanent drift -- invisible in a single frame, and fatal at a landing.
+    g.run(8)
+    check(g.ship()["vx"] == 0,
+          "and friction comes to rest rather than crawling -- vx is 0 after "
+          "letting go, not a permanent sub-DRAG drift (vx %d)" % g.ship()["vx"])
+
+    # The aggregate, against the per-tick claim above: every strafing tick this
+    # block flew cost FUEL_BURN and nothing else did, the settle and the two
+    # sprite reads included.
+    strafe_ticks = 2 + 3 + 2 * k
+    check(g.ship()["fuel"] == FUEL_START - strafe_ticks * FUEL_BURN,
+          "and the whole flight of it cost the engine's own rate -- %d ticks of "
+          "sideways thrust is %d units out of %d (fuel %d)"
+          % (strafe_ticks, strafe_ticks * FUEL_BURN, FUEL_START,
+             g.ship()["fuel"]))
 
 
 # ------------------------------------------------------------------ P5 -----
@@ -2474,44 +2556,52 @@ def p13_descent(g):
           % (bands, band_fails[:3]))
 
     # ---- the horizontal wrap, under THIS profile --------------------------
-    # A second life, because the first one ended on the pad.  The ship is
-    # turned nose-first into the world -- heading 4 is +x, no dy at all -- and
-    # then flown until the ground stops it.  Every tick of it is on the DESCENT
-    # profile (752 px of air, and a ship at heading 4 thrusts sideways only, so
-    # it still falls the whole way).
+    # A second life, because the first one ended on the pad.  The ship is flown
+    # SIDEWAYS into the world -- holding RIGHT leans the nose over and the
+    # sideways thruster pushes it -- so it is heading for the seam and falling
+    # the whole way at once, because that push is horizontal and gravity is the
+    # only thing on the vertical axis.  Every tick of it is on the DESCENT
+    # profile: 752 px of air, and nothing in this flight brakes.
     g.run(8, "S")
     g.run(2)
-    for _ in range(4):          # RIGHT four times: one step per press, not per frame
-        g.run(4, "R")
-        g.run(2)
-    check(g.ship()["heading"] == 4,
-          "the second life is turned nose-first into the world -- heading 4 is "
-          "+x and no dy at all (heading %d)" % g.ship()["heading"])
+    check(g.ship()["heading"] == 0 and g.ship()["fuel"] == FUEL_START,
+          "the second life is upright and fully fuelled -- the flight below is "
+          "the SIDEWAYS THRUSTER's, and a tank already spent would be a coast "
+          "wearing the same wrap (heading %d, fuel %d)"
+          % (g.ship()["heading"], g.ship()["fuel"]))
 
     xs = []
     crossings = 0               # ticks where x came back round the seam
     seam_reads = 0              # ticks the ship's centre was on the seam
+    leant = 0                   # ticks the nose was leaning on the strafe
     alt_bad = []
     prev_x = None
     ticks = 0
     f1 = g.u16("frame")
     while g.ship()["state"] == ST_FLY and ticks < P13_WRAP_LIMIT:
         before = g.ship()
-        g.run(1, "A")           # held: heading 4, so this is sideways only
+        g.run(1, "R")           # held: this is the sideways thruster, all of it
         ticks += 1
         s = g.ship()
         xs.append(s["x"])
+        if s["heading"] == LEAN_STEPS:
+            leant += 1
         # The only way x moves backwards is the seam: vx is positive for the
-        # whole flight, so a step of a pixel or two forward and a jump of
-        # ~160 back is a crossing and nothing else can look like one.
-        if prev_x is not None and s["x"] + 16 < prev_x:
+        # whole flight -- and CLIMBING, since nothing here lets go of it -- so a
+        # step forward and a jump of ~160 back is a crossing and nothing else
+        # can look like one.
+        crossed = prev_x is not None and s["x"] + 16 < prev_x
+        if crossed:
             crossings += 1
         prev_x = s["x"]
         # ON THE SEAM, and the ground read off the ROM's OWN HUD: what is under
         # the ship there is the column its CENTRE wrapped onto, which is the
         # second wrap -- the one inside ship_col() -- and the ALT the status bar
-        # shows is the only thing here that goes through it.
-        if s["x"] >= WORLD_W_PX - SHIP_W or s["x"] < SHIP_W:
+        # shows is the only thing here that goes through it.  The tick x came
+        # back on counts as one: a ship accelerating sideways can step clean
+        # OVER the seam window without ever landing inside it, and that tick is
+        # the most seam-read of the lot.
+        if crossed or s["x"] >= WORLD_W_PX - SHIP_W or s["x"] < SHIP_W:
             seam_reads += 1
             got = g.hud_num(HUD_ALT_ROW, HUD_ALT_COL, HUD_ALT_W)
             want = [ground_under(descent, s["x"]) - (s["y"] + SHIP_H),
@@ -2555,6 +2645,16 @@ def p13_descent(g):
           "MORE THAN ONCE, so the seam is the world's edge and not a place the "
           "ship happened to stop -- %d crossings of the %d px seam over %d "
           "frames" % (crossings, WORLD_W_PX, len(xs)))
+    check(leant == ticks,
+          "and the nose was leaning on the strafe for every tick of it -- the "
+          "push is the LEAN and not a turn-and-burn, and a ship that straightened "
+          "up mid-flight would have stopped pushing with it (%d of %d ticks at "
+          "heading %d)" % (leant, ticks, LEAN_STEPS))
+    check(g.ship()["fuel"] > 0,
+          "and the sideways thruster still had fuel at the end of the flight -- "
+          "the wrap is the STRAFE's, so a tank that emptied partway would leave "
+          "a coasting ship wearing it (%d of %d units left after %d ticks)"
+          % (g.ship()["fuel"], FUEL_START, ticks))
     check(seam_reads >= 4 and not alt_bad,
           "and the ground under it ON the seam is the DESCENT profile's, read "
           "off the ROM's own ALT -- the column the centre WRAPPED onto, not the "

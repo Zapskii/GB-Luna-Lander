@@ -11,15 +11,16 @@ a life.
 
 | Button | What it does |
 |--------|--------------|
-| d-pad LEFT | turn the nose one step to the left (anticlockwise) |
-| d-pad RIGHT | turn the nose one step to the right (clockwise) |
+| d-pad LEFT / RIGHT | push the ship that way. **Hold one** to keep pushing — the ship leans into it and picks up speed, and it straightens up again the moment you let go |
 | A or B | thrust. **Hold one** to keep burning — the engine runs as long as you hold, and the tank empties the whole time |
 | START | start a new life — while flying, or after a landing or a crash |
 | SELECT | back to the title screen — in flight, or after a landing or a crash. On the title it switches between the two modes |
 
-LEFT and RIGHT are one step per press: holding one down turns the ship once, not
-continuously. There are sixteen steps in a full turn. Thrust is the other kind of
-control — a held one, and either face button will do it.
+LEFT and RIGHT are held, like the engine, and not one step per press: the ship
+leans over and its speed sideways builds for as long as the direction is down.
+Let go and it stands upright again immediately, and the drift dies away on its
+own over the next moment. Pushing sideways burns fuel at the same rate as
+thrusting does.
 
 On the title screen, SELECT picks between **LANDER** and **DESCENT**, and START
 plays whichever one the title names. SELECT in flight abandons the life and goes
@@ -37,9 +38,13 @@ differs is the world.
 ## Flying the ship
 
 Gravity is always pulling the ship down, and the engine is the only thing that
-beats it. The nose points the way the engine pushes, so you steer by rotating
-and then thrusting: turn to face the direction opposite your drift, burn briefly,
-then straighten up again.
+beats it. The engine pushes along the nose, and the nose only ever points
+straight up or leans into a sideways push — so controlling the descent is the
+engine's job, and the d-pad is for moving it across.
+
+A sideways push does not last: let go of the direction and the nose comes back
+upright, and the drift runs out by itself. Cancel a drift by pushing the other
+way and then letting go, rather than by steering the nose round at it.
 
 The ship's world wraps around. Fly off the left edge and you arrive at the
 right one; the terrain is built so the join is invisible.
@@ -60,7 +65,8 @@ Three more things have to be true at the moment you touch down:
 - **Don't drift sideways.** The ship has to be moving sideways hardly at all
   when it lands, so cancel your sideways speed before you arrive.
 - **Keep the nose up.** The ship must be close to vertical — within about
-  22.5° of straight up.
+  22.5° of straight up. Letting go of the d-pad stands it up, so this one is
+  about not still pushing when you arrive.
 
 You do not have to be perfectly upright-vertical or exactly motionless; there is
 a little room in all three. The margins are small enough that the way to land

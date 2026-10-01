@@ -51,19 +51,23 @@ refactor of the physics, the tests and the checks. `terrain.h` and
 
 | Button | What it does |
 |---|---|
-| d-pad LEFT | rotate one step anticlockwise |
-| d-pad RIGHT | rotate one step clockwise |
-| A or B | thrust. **Hold** one to keep burning — this is the held control, not the edge |
+| d-pad LEFT | lean and push the ship left. **Hold** to keep pushing |
+| d-pad RIGHT | lean and push the ship right. **Hold** to keep pushing |
+| A or B | thrust along the nose. **Hold** one to keep burning — this is the held control, not the edge |
 | START | restart the life — mid-flight, after a landing, after a crash |
 | SELECT | back to the title — in flight, after a landing, after a crash; on the title itself, switch between **LANDER** and **DESCENT** |
 
-LEFT and RIGHT are edges: one press is one 22.5° step, and holding one down does
-not spin the ship. Thrust is the opposite — a held level, on both face buttons
-because the DMG has no shoulder pair to put it on and it is the one control that
-has to be held *while* the ship is steered. There are 16 headings and the nose
-always points the way thrust
-acceleration does, because the sprite frame and the thrust vector come out of
-the same heading byte.
+LEFT and RIGHT are held levels, like the engine: a direction down leans the nose
+into a fixed angle and adds a sideways acceleration every tick, and letting go
+stands the nose up again on that same tick and hands the drift to friction,
+which takes it back off at a constant rate and clamps it to zero rather than
+running through it. So a correction is a press and a wait, not a press and a
+counter-press, and sideways thrust spends fuel at the engine's own rate. Thrust
+is a held level too, on both face buttons because the DMG has no shoulder pair
+to put it on. The nose only ever sits at three angles — upright, or leaned into
+whichever direction is held — and the sprite frame and the thrust vector come
+out of the same heading byte, so the lean is not decoration: a landing mid-strafe
+is a landing with the nose off vertical, which is a crash.
 
 ## The landing
 
@@ -76,7 +80,7 @@ verdicts are checked in a fixed order and each failure has a named threshold:
 | **CRASH** | the column under the ship is not a landing pad | no pad — checked first, because it outranks everything else |
 | **TOO_FAST** | the ship is coming down too hard | descent > 0.5 px/frame |
 | **DRIFTING** | it is moving sideways when it touches down | sideways speed > 0.25 px/frame |
-| **TILTED** | the nose is too far off vertical | more than one 22.5° step |
+| **TILTED** | the nose is too far off vertical | more than one 22.5° step — and the lean is two, so landing mid-strafe is a crash |
 | **SAFE** | inside all of the above | — |
 
 Only a pad is safe ground; a perfectly gentle touchdown anywhere else is still a
@@ -149,7 +153,8 @@ physics on the host — no emulator, no ROM. It pins what the maths is: the exac
 8.8 trajectory gravity produces from rest, the fraction bytes carrying between
 ticks (a fraction byte that lived in a local instead of the state would quantise
 the motion to whole pixels and look merely "chunky"), thrust as a direction out
-of `tables.h`, the fuel economy, the heading wrap, and every landing threshold
+of `tables.h`, the fuel economy, the sideways lean and the friction that settles
+it, and every landing threshold
 from both sides. An early case asserts the widths the rest of the file is
 written in, because GBDK's `int` is 16-bit and a type that silently widened here
 would poison everything below it.

@@ -244,35 +244,37 @@ int main(void)
         check(s.fuel == FUEL_START - 8 * FUEL_BURN,
               "and nothing burns while the button is up (%d left)", s.fuel);
 
-        /* The VECTOR, not the magnitude.  Nose right: thrust drives vx and
-         * leaves vy to gravity ALONE, which an "upward kick regardless of
-         * heading" implementation cannot do. */
+        /* The VECTOR, not the magnitude.  Nose LEANED RIGHT: thrust drives vx
+         * and adds a vertical component that is the table's dy rather than
+         * -THRUST -- the difference between a real attitude and one that only
+         * swaps the sprite.  The strafe itself is in the same tick's vx, which
+         * is why this is asserted as the two together: the lean and the push
+         * are one input and a step that did either without the other fails. */
         s = spawn();
-        s.heading = ROT_STEPS / 4;              /* 90 deg clockwise: nose right */
         vx0 = s.vx;
         vy0 = s.vy;
         for (i = 0; i < 8; i++)
-            ship_step(&s, SHIP_THRUST);
-        check(s.vx - vx0 == 8 * ((THRUST * thrust_dx[ROT_STEPS / 4]) >> 8) &&
-              s.vy - vy0 == 8 * GRAV && s.vx > vx0,
-              "nose right, thrust drives vx and leaves vy to gravity alone "
-              "(vx %d -> %d, vy %d -> %d)", vx0, s.vx, vy0, s.vy);
-
-        /* ... and a diagonal splits across both axes, the vertical part being
-         * the table's dy rather than -THRUST -- the difference between a real
-         * rotation and one that only swaps the sprite. */
-        s = spawn();
-        s.heading = ROT_STEPS / 8;              /* 45 deg: up and to the right */
-        vx0 = s.vx;
-        vy0 = s.vy;
-        for (i = 0; i < 8; i++)
-            ship_step(&s, SHIP_THRUST);
-        check(s.vx - vx0 == 8 * ((THRUST * thrust_dx[ROT_STEPS / 8]) >> 8) &&
+            ship_step(&s, SHIP_STRAFE_R | SHIP_THRUST);
+        check(s.heading == LEAN_STEPS &&
+              s.vx - vx0 == 8 * (STRAFE + ((THRUST * thrust_dx[LEAN_STEPS]) >> 8)) &&
               s.vy - vy0 ==
-                  8 * (GRAV + ((THRUST * thrust_dy[ROT_STEPS / 8]) >> 8)) &&
-              s.vx > 0 && s.vy < vy0,
-              "a diagonal thrust splits across both axes and still climbs "
-              "(vx %d -> %d, vy %d -> %d)", vx0, s.vx, vy0, s.vy);
+                  8 * (GRAV + ((THRUST * thrust_dy[LEAN_STEPS]) >> 8)) &&
+              s.vx > vx0,
+              "leaning right and thrusting drives vx and leaves vy to gravity "
+              "plus the table's dy (vx %d -> %d, vy %d -> %d)",
+              vx0, s.vx, vy0, s.vy);
+
+        /* The lean is the OTHER way round for LEFT, and it is ROT_STEPS -
+         * LEAN_STEPS and not -LEAN_STEPS: the heading is an unsigned index, so
+         * a left lean is the far end of the table and its dx is negative. */
+        s = spawn();
+        for (i = 0; i < 8; i++)
+            ship_step(&s, SHIP_STRAFE_L | SHIP_THRUST);
+        check(s.heading == ROT_STEPS - LEAN_STEPS &&
+              s.vx == 8 * (-STRAFE + ((THRUST * thrust_dx[ROT_STEPS - LEAN_STEPS]) >> 8)) &&
+              s.vx < 0,
+              "and leaning left mirrors it across the table rather than "
+              "underflowing (vx %d)", s.vx);
     }
 
     {
@@ -303,47 +305,90 @@ int main(void)
               "falls by GRAV alone and vx stays at %d (vy %d -> %d)",
               s.vx, vy0, s.vy);
 
-        /* Rotation is not fuel: an empty ship can still point itself at the
-         * ground, so the failure is in the tank and not in the stick. */
-        vx0 = s.heading;
-        ship_step(&s, SHIP_ROT_R);
-        check(s.heading == (uint8_t)((vx0 + 1) & (ROT_STEPS - 1)),
-              "the heading still turns with an empty tank (%d -> %d)",
-              vx0, s.heading);
+        /* ... and the strafe is under the same rule, which is why sim.h gates
+         * the LEAN on fuel too: a nose that tips without moving the ship is a
+         * lie about what the sprite is showing. */
+        vx0 = s.vx;
+        ship_step(&s, SHIP_STRAFE_R);
+        check(s.heading == 0 && s.vx == vx0 && s.fuel == 0,
+              "and a strafe with the tank dry does nothing at all -- no push "
+              "and no lean (heading %d, vx %d)", s.heading, s.vx);
     }
 
     {
         Ship s;
         uint8_t i;
+        uint16_t n;
 
-        /* A/B are one step each and undo each other, so the wrap is a mask and
-         * not a modulo that could land a step out.  Both directions, both ends. */
+        /* THE LEAN: one tick of held direction tips the nose into the push and
+         * the tick after it is let go the nose is upright again.  There is no
+         * step count and no wrap any more -- the heading is a reading of the
+         * input, so the only values it can take are the two written here. */
         s = spawn();
-        ship_step(&s, SHIP_ROT_R);
-        check(s.heading == 1, "B steps the nose one heading clockwise");
-        ship_step(&s, SHIP_ROT_L);
-        check(s.heading == 0, "and A steps it back, so the two undo each other");
+        ship_step(&s, SHIP_STRAFE_R);
+        check(s.heading == LEAN_STEPS,
+              "holding RIGHT leans the nose into the push (heading %d)",
+              s.heading);
+        ship_step(&s, 0);
+        check(s.heading == 0,
+              "and letting go puts it upright the very next tick");
 
-        ship_step(&s, SHIP_ROT_L);
-        check(s.heading == ROT_STEPS - 1,
-              "A from heading 0 wraps to the last heading, not below zero");
-        ship_step(&s, SHIP_ROT_R);
-        check(s.heading == 0, "and B wraps back to 0 rather than past the end");
+        ship_step(&s, SHIP_STRAFE_L);
+        check(s.heading == ROT_STEPS - LEAN_STEPS,
+              "LEFT leans the other way, off the far end of the table (%d)",
+              s.heading);
+        ship_step(&s, 0);
+        check(s.heading == 0, "and that one comes upright too");
 
-        ship_step(&s, SHIP_ROT_L | SHIP_ROT_R);
-        check(s.heading == 0, "A and B in the same tick cancel out");
+        /* Both directions in one tick read as RIGHT.  That is one `else` in
+         * sim.h rather than a rule, so this is what pins which way it falls. */
+        ship_step(&s, SHIP_STRAFE_L | SHIP_STRAFE_R);
+        check(s.heading == LEAN_STEPS && s.vx == STRAFE,
+              "both directions in one tick read as RIGHT (heading %d, vx %d)",
+              s.heading, s.vx);
 
-        /* ... and that a full turn is exactly ROT_STEPS steps, so the table and
-         * the sprite bank line up on the same sixteen. */
-        for (i = 0; i < ROT_STEPS; i++)
-            ship_step(&s, SHIP_ROT_R);
-        check(s.heading == 0 && i == ROT_STEPS,
-              "ROT_STEPS steps clockwise is a whole turn, back to nose up");
+        /* ACCELERATION: held, it is STRAFE a tick and there is no cap on it --
+         * a thruster does not run out of push. */
+        s = spawn();
+        for (i = 0; i < 8; i++)
+            ship_step(&s, SHIP_STRAFE_R);
+        check(s.vx == 8 * STRAFE && s.heading == LEAN_STEPS,
+              "eight ticks of held RIGHT is eight lots of STRAFE, still leaned "
+              "(vx %d, heading %d)", s.vx, s.heading);
 
-        /* Rotating is free: it is not a burn, and it must not be possible to
-         * run the tank down by wiggling the stick. */
-        check(s.fuel == FUEL_START,
-              "rotation costs no fuel (%d of %d left)", s.fuel, FUEL_START);
+        /* FRICTION: released, vx comes back to zero at DRAG a tick and STOPS
+         * there.  The clamp is the point -- a vx that ran through zero would
+         * drag the ship backwards with nothing behind it. */
+        for (i = 0; i < 8; i++)
+            ship_step(&s, 0);
+        check(s.vx == 0,
+              "and letting go brings it to rest in %d ticks (%d)",
+              8 * STRAFE / DRAG, s.vx);
+
+        /* The settle is a FIXED number of ticks whatever the strafe reached,
+         * and that is what makes "stop pushing before you arrive" plannable:
+         * from any speed, ceil((vx - SAFE_VX_MAX) / DRAG) ticks after the
+         * release the ship is inside the landing limit again.  This is the
+         * derived form and not a measured literal -- if STRAFE, DRAG or
+         * SAFE_VX_MAX move, the number moves with them. */
+        s = spawn();
+        for (i = 0; i < 20; i++)
+            ship_step(&s, SHIP_STRAFE_R);
+        check(s.vx > SAFE_VX_MAX,
+              "a 20-tick strafe is well past the landing limit (vx %d > %d)",
+              s.vx, SAFE_VX_MAX);
+        for (n = 0; s.vx > SAFE_VX_MAX && n < 250; n++)
+            ship_step(&s, 0);
+        check(n == (20 * STRAFE - SAFE_VX_MAX + DRAG - 1) / DRAG && n < 250,
+              "and it is back inside SAFE_VX_MAX %d ticks after the release "
+              "(vx %d, want %d)", n, s.vx,
+              (20 * STRAFE - SAFE_VX_MAX + DRAG - 1) / DRAG);
+
+        /* Strafing is a burn, not a free nudge: the tank pays for the sideways
+         * thruster out of the same count it pays the main one. */
+        check(s.fuel == (uint16_t)(FUEL_START - 20 * FUEL_BURN),
+              "strafing costs exactly one burn a tick for the 20 held (%d of "
+              "%d left)", s.fuel, FUEL_START);
     }
 
     /* ------------------------------------------------------------ P5 ---- */
@@ -525,11 +570,17 @@ int main(void)
         /* The wrap.  160 is not 256, and these two are the family's named
          * trap: with an `& WORLD_MASK` the first case leaves the ship at
          * x 255, off the right edge of a 160 px world, where it reads as
-         * flying away rather than coming round. */
+         * flying away rather than coming round.
+         *
+         * The `+ DRAG` is not slack: a tick with no direction held runs the
+         * friction, so the velocity WRITTEN here is not the one that arrives at
+         * the move -- one whole pixel a tick means DRAG more than 256 going in.
+         * Writing a bare 256 works on one side and not the other, because the
+         * shift rounds a negative remainder down. */
         s = spawn();
         s.y = 0;
         s.x = 0;
-        s.vx = -256;
+        s.vx = -(256 + DRAG);
         ship_step(&s, 0);
         check(s.x == WORLD_W - 1,
               "leaving the LEFT edge arrives at x %d, not at 255 (x %d)",
@@ -538,7 +589,7 @@ int main(void)
         s = spawn();
         s.y = 0;
         s.x = (uint16_t)(WORLD_W - 1);
-        s.vx = 256;
+        s.vx = 256 + DRAG;
         ship_step(&s, 0);
         check(s.x == 0,
               "and leaving the RIGHT edge arrives at x 0 (x %d)", s.x);
