@@ -14,9 +14,10 @@ below this line is the build and the internals.
 **Current stage: Milestone 2 complete.** Two modes play end to end — LANDER's
 fixed 160 px world and DESCENT's 808 px one — over one ship that leans,
 thrusts, burns fuel, wraps at the world's edges, and comes to rest on a pad or
-crashes: a landing verdict with a named reason and a score, live telemetry over
-the ground in a status bar that the scrolling does not touch, a burst where the
-ship died, three sounds, and a Super Game Boy border.
+crashes: a landing verdict with a named reason and a score, a full-screen page
+for each ending, live telemetry over the ground in a status bar that the
+scrolling does not touch, a burst where the ship died, three sounds, and a Super
+Game Boy border.
 `make` builds the ROM, `make test` runs the physics' unit tests on the host, and
 `make probe` drives the ROM in a headless emulator and asserts on what it did.
 
@@ -98,12 +99,50 @@ comes off the same tick clock the physics runs on rather than off a drawn frame,
 so a frame that overruns its budget cannot animate the burst faster than the
 thing it is reporting on.
 
+## The endings
+
+The field is not where a life is reported. Each ending gets a full-screen page,
+built into the same shadow buffer the title is and blitted **once** — the same
+idiom, so an ending costs one map write paid on a single tick and the tick loop
+carries none of it while it is up:
+
+| Page | What it says | When it comes up |
+|---|---|---|
+| **LANDED** | the pad's multiplier, and the fuel left in the tank | the tick the ship comes to rest |
+| **CRASHED** | the verdict `classify_landing()` returned, named — TOO FAST, DRIFTING, TILTED, NO PAD | the tick after the crash burst finishes |
+
+The asymmetry is the burst's and not a preference. A landing is a ship at rest
+with nothing left to watch, so its page is immediate; an explosion *is* the
+death, and a page drawn over it would delete the one thing that says the ship was
+destroyed rather than merely stopped. Both pages read `ship.verdict` and
+`ship.mult` — the rule's own answers — so a page can never disagree with the rule
+about why a life ended.
+
+The status bar is cleared with the world. It is the WINDOW layer and covers the
+screen's bottom two rows whatever the background holds, and its readings are
+about a flight that has finished: ALT is 0 on both pages, the tank is whatever
+was left, and the verdict row would be repeating the page's own heading. START
+opens a new life from either page, on the field and on the mode already selected;
+SELECT goes back to the title.
+
+The crash page is also the reason `build_hud()`'s second row has no LANDED case
+any more — that row would be written and covered on the same tick — and why
+probe.p13 stops sampling the camera on the tick a descent ends: that tick's
+screen is no longer one the camera draws.
+
 Pad multipliers come out of `terrain.h`, not out of the renderer:
 
 | Pad | Columns | Score |
 |---|---|---|
 | LOW | 4–7 | ×1 |
 | HIGH | 13–14 | ×2 |
+
+**A pad is drawn as a pad.** `row_blit()` picks the surface tile with
+`pad_mult(col)` — `T_PAD_TOP` on a pad column, `T_TERRAIN_TOP` everywhere else —
+so the two places a life can end well are the only lit things on the ground
+rather than two stretches that merely happen to be flat. The question is asked
+only on the surface row, which is what keeps it off the per-cell path `p13`'s
+frame budget is measured on.
 
 The ship spawns directly above the ×2 pad, at rest, so a drop with nobody at the
 controls is a crash and the whole of the skill is arriving slowly.
@@ -185,7 +224,7 @@ to *play* the game, and `make` on its own builds the ROM with no Python at all.
 | `terrain.h` | Generated, committed — a plain `make` needs no Python |
 | `tools/mktab.py` | Generates `tables.h`: the 16 thrust unit vectors |
 | `tables.h` | Generated, committed |
-| `mkgfx.py` | Generates `gfx.h`: the font, the terrain tiles, the four star tiles, the 16 ship frames and the four crash-burst frames |
+| `mkgfx.py` | Generates `gfx.h`: the font, the terrain tiles, the pad deck, the four star tiles, the 16 ship frames and the four crash-burst frames |
 | `gfx.h` | Generated, committed. Included by `main.c` only |
 | `tools/mkborder.py` | Generates `art/border_sgb.png`, the Super Game Boy border, with self-checks |
 | `art/border_sgb.png` | Generated, committed — the 256x224 border art |
@@ -228,6 +267,12 @@ tall profile, and that same one-tick-per-frame check on the mode that had escape
 it. P14 is bytes rather than pixels: it asserts the ROM's SGB header and that
 the border data is linked in at full length in bank 1, and says plainly that the
 artwork itself is owed to a human looking at it on an emulated Super Game Boy.
+P15 is the same split for the endings: it reads the pages off the BG tilemap
+through the probe's own font ids — the heading, and the reason the ROM's own
+`ship.verdict` says the crash was — and asserts the timing a screenshot cannot
+show, that a crash's burst plays every frame of itself before the page covers it
+and that a landing's page is immediate. Two crashes with different verdicts are
+driven on purpose, so a page that always said the same word fails.
 
 `make probe` exits 0 when every check passes, 1 when a check fails, and 2 when
 the harness itself broke — so a stuck ROM is never mistaken for a passing one.
@@ -235,9 +280,9 @@ the harness itself broke — so a stuck ROM is never mistaken for a passing one.
 ## Not implemented yet (by design)
 
 - **Levels, and any score that outlives a life.** One landing scores its pad's
-  multiplier and START is the only thing that follows it. A descent spends about
-  a quarter of its tank, so the mode is a flight to be flown rather than a budget
-  to be rationed.
+  multiplier on the ending page and START is the only thing that follows it.
+  A descent spends about a quarter of its tank, so the mode is a flight to be
+  flown rather than a budget to be rationed.
 - **A saved high score.** It needs a battery-backed cart, which is a
   hardware/BOM decision rather than just a code change.
 - **Difficulty or a wind model.** Gravity and thrust are two constants; the

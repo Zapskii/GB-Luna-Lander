@@ -22,9 +22,9 @@ NAMES = []          # (define name, tile id), for the generated #defines
 DRAWN = set()       # ids put() was actually asked for
 
 # The id gap between the terrain tiles and the font, less the four the stars
-# took (3..6).  Named because the self-check below asserts the gap is exactly
-# these ids and nothing else: a typo'd id would otherwise grow the array and
-# shift the numbering in silence.
+# took (3..6) and the one the pad deck took (7).  Named because the self-check
+# below asserts the gap is exactly these ids and nothing else: a typo'd id would
+# otherwise grow the array and shift the numbering in silence.
 GAP = list(range(7, 20))
 
 BLANK = ["........"] * 8
@@ -85,6 +85,29 @@ put(2, ["11111111",
         "#2######",
         "########",
         "2#######"], "T_TERRAIN_TOP")
+
+# THE LANDING PAD DECK, which is the same tile row as T_TERRAIN_TOP and
+# deliberately NOT the same tile.  Until this existed a pad was only ever
+# visible as a stretch of ground that happened to be flat: the surface tile was
+# one id for the whole world, so the two platforms read as an accident of the
+# profile rather than as the only two places a life can end well.  The whole
+# skill of the game is arriving on one of them, and finding them was a matter of
+# holding the ship still and reading PAD X off the bar.
+#
+# SEVEN ROWS OF LIGHT AGAINST THE BLACK BODY is what makes it visible at a
+# glance: every other column's crust is one light line, so a lit block 8 px deep
+# is the only bright thing on the ground.  The notches break up the fill for the
+# same reason the ground body is flecked instead of flat -- a solid bright block
+# and an unloaded tile bank look alike on a screenshot, and this one is meant to
+# be FOUND, not merely drawn.
+put(7, ["11111111",
+        "1#1#1#1#",
+        "11111111",
+        "1#1#1#1#",
+        "11111111",
+        "1#1#1#1#",
+        "11111111",
+        "########"], "T_PAD_TOP")
 
 # ------------------------------------------------------------------ stars
 # FOUR variants, and the count is the point.  One star tile would put every
@@ -361,7 +384,7 @@ SPRITES = SHIP_SPRITES + BOOM_SPRITES
 NTILES = 57
 TILE_IDS = sorted(DRAWN)
 assert len(TILES) == NTILES, "expected %d tile ids, got %d" % (NTILES, len(TILES))
-assert TILE_IDS == [0, 1, 2, 3, 4, 5, 6, 19] + list(range(20, NTILES)), (
+assert TILE_IDS == [0, 1, 2, 3, 4, 5, 6, 7, 19] + list(range(20, NTILES)), (
     "unaccounted tile ids: %r" % (sorted(set(range(NTILES)) - DRAWN - set(GAP))))
 assert max(TILE_IDS) < 128, "tile id %d >= 128 reads the sprite bank" % max(TILE_IDS)
 

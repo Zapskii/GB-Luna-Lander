@@ -190,9 +190,16 @@ typedef char screen_h_matches[(VIEW_H * 8 == SCREEN_H_PX) ? 1 : -1];
  * they are reused rather than shadowed here because once the life is over the
  * SHIP's state IS the screen's: a second pair of constants saying the same
  * thing is a pair that can disagree with the first, and only one of them would
- * be telling the truth. */
+ * be telling the truth.
+ *
+ * ST_END is the third SCREEN and not a third ending: it is the field with a
+ * life that has finished, so WHICH page is up is still read off ship.state --
+ * the byte probe.p5_landing grades the landing rule with -- and this byte says
+ * only "the field has stopped being drawn".  A second pair of constants for
+ * landed-page and crashed-page would be that same duplication over again. */
 #define ST_TITLE 0
 #define ST_PLAY  1
+#define ST_END   2
 
 /* The two modes the title offers.  This byte was INERT when P6 wrote the title
  * -- SELECT flipped it and the title said so and nothing else read it -- and it
@@ -733,11 +740,10 @@ static void build_hud(void)
     dec(&bg[13], 3, alt);
 
     /* The second row is CLEARED before it is written, and it has to be: its
-     * readings are not the same length -- "CRASHED" is seven tiles and
-     * "LANDED X2" nine, against the velocity row's twenty -- so a life that
-     * ends and is restarted would leave the tail of the longer string sticking
-     * out behind the shorter one.  Row 0 is one fixed layout sixteen tiles wide
-     * and has nothing to clear. */
+     * readings are not the same length -- "CRASHED" is seven tiles against the
+     * velocity row's twenty -- so a life that ends and is restarted would leave
+     * the tail of the longer string sticking out behind the shorter one.  Row 0
+     * is one fixed layout sixteen tiles wide and has nothing to clear. */
     for (i = 0; i < VIEW_W; i++)
         bg[VIEW_W + i] = T_BLANK;
 
@@ -756,10 +762,22 @@ static void build_hud(void)
          * blank that the layout below has no room for. */
         text(bg, 14, 1, "PAD X");
         dec(&bg[VIEW_W + 19], 1, (int16_t)pad_mult(col));
-    } else if (ship.state == ST_LANDED) {
-        text(bg, 0, 1, "LANDED X");
-        dec(&bg[VIEW_W + 8], 1, (int16_t)ship.mult);
-    } else {
+    } else if (ship.state == ST_CRASH) {
+        /* THE ONE ENDING THE BAR STILL REPORTS, and only because a crash has a
+         * burst to get through first: the burst is 16 ticks and the page is on
+         * the far side of it, so the strip is what says the life is over while
+         * the wreck is still going up.
+         *
+         * A LANDING WRITES NOTHING HERE and the row stays as the clear above
+         * left it.  Its page is blitted on the same tick the ship comes to
+         * rest -- there is nothing to watch, so there is nothing to wait for --
+         * which means a "LANDED X2" written here would be covered before a
+         * frame of it was ever drawn.
+         *
+         * And NOT an `else`, which is what this was: an `else` would put
+         * CRASHED under a landed ship on the tick between the step that landed
+         * it and the page that replaces this row.  Neither is drawn, and one of
+         * them is a lie. */
         text(bg, 0, 1, "CRASHED");
     }
 }
@@ -779,6 +797,19 @@ static void build_hud(void)
  * the art in -- so there is no `<< 3` anywhere here.  A `<< 3` is the classic
  * "heights are pixels" slip and it would drop the ground eight rows and push
  * the bottom of it off the screen, which still LOOKS like terrain.
+ *
+ * THE SURFACE ROW IS TWO TILES, and which one a column wears is the PADS'
+ * question.  A pad drawn in the ordinary crust is a pad the player can only
+ * find by holding the ship still and reading PAD X off the bar -- which is the
+ * whole skill of the game resting on a number instead of on the screen.  So a
+ * pad column's surface row wears T_PAD_TOP and every other column wears the
+ * crust, and the two lit platforms are the only bright things on the ground.
+ *
+ * pad_mult() is asked ONLY on the surface row.  The rows either side are sky or
+ * body and never need to know, and this loop is the one probe.p13_descent's
+ * frame budget is measured on -- its free-fall tick writes two rows on the last
+ * frame it has.  Asking per CELL would put a call in forty times a tick there;
+ * asking per surface column puts it in once or twice.
  *
  * World COLUMN N is screen column N: there is still no horizontal camera, and
  * the world wraps in 160 px at the same seam it always did.  Only the ROWS are
@@ -839,7 +870,8 @@ static void row_blit(uint8_t wr)
         uint8_t surface = terrain[col];     /* surface row, tile units */
 
         rowbuf[col] = (wr < surface) ? T_BLANK
-                    : (wr == surface) ? T_TERRAIN_TOP : T_TERRAIN;
+                    : (wr == surface) ? (pad_mult(col) ? T_PAD_TOP : T_TERRAIN_TOP)
+                    : T_TERRAIN;
     }
 
     star_restore(wr);
@@ -1026,6 +1058,68 @@ static void build_title(void)
     text(bg, 4, MODE_ROW, pick == MODE_LANDER ? "MODE LANDER" : "MODE DESCENT");
     text(bg, 4, 10, "SELECT MODE");
     text(bg, 4, 12, "PRESS START");
+}
+
+/* The two ending pages: the world is gone, the life is over, and one of these
+ * IS the screen until START or SELECT replaces it.
+ *
+ * SAME IDIOM AS build_title() and deliberately so -- build into `bg`, blit
+ * once -- because that is what makes an ending cost one 20x18 map write paid on
+ * a single tick rather than anything the tick loop carries.  The field's own
+ * per-tick work stops with ST_END, so this is the cheapest screen in the file
+ * once it is up: nothing rebuilds, nothing streams, nothing scrolls.
+ *
+ * WHAT IS ON THEM IS THE VERDICT sim.h ALREADY COMPUTED, named rather than
+ * scored.  ship.verdict is the rule's own answer and ship.mult its own score,
+ * so the page is a reading of the state and never a second opinion about it: a
+ * page that re-derived why the ship crashed could disagree with the rule that
+ * crashed it, and the screen is where that disagreement would be invisible.
+ *
+ * NO TELEMETRY, and the WINDOW map is cleared with the BG one to make that
+ * true -- see the ending block in the tick loop.  The bar's readings are about
+ * a flight that has finished (ALT is 0 on both pages, the tank is whatever was
+ * left), and the row that named the verdict would be saying what the heading
+ * above it already says.
+ *
+ * The two prompt lines are rows 13 and 15 and both pages spell them the same,
+ * because they are the same two things.  They are UPPERCASE like every other
+ * literal here: glyph() sends a lowercase letter to T_BLANK, so "new life"
+ * would draw as a hole in the middle of the row and read as a layout bug. */
+static void build_landed(void)
+{
+    bg_clear();
+    text(bg, 7, 4, "LANDED");
+    /* The score, on its own line and centred: it is the one number the life
+     * was worth, and X2 read off ship.mult is the multiplier sim.h's own
+     * pad_mult() gave the column the ship came to rest on. */
+    text(bg, 9, 7, "X");
+    dec(&bg[7 * VIEW_W + 10], 1, (int16_t)ship.mult);
+    /* ...and what it cost.  Same layout as the HUD's FUEL field, one digit
+     * wider because nothing here has to share its row with two velocities. */
+    text(bg, 3, 10, "FUEL LEFT ");
+    dec(&bg[10 * VIEW_W + 13], 3, (int16_t)ship.fuel);
+    text(bg, 3, 13, "START NEW LIFE");
+    text(bg, 4, 15, "SELECT TITLE");
+}
+
+static void build_crashed(void)
+{
+    bg_clear();
+    text(bg, 6, 4, "CRASHED");
+    /* WHY, out of ship.verdict -- the four ways a life ends badly, and the
+     * `default` is LAND_CRASH: the ship touched down on ground that is not a
+     * pad, which is checked ahead of the three below because it outranks them.
+     * The three short reasons are one column further right so they sit under
+     * the heading rather than a tile left of it; the font has one width and a
+     * six-tile string centred by hand is not. */
+    switch (ship.verdict) {
+    case LAND_TOO_FAST: text(bg, 6, 7, "TOO FAST"); break;
+    case LAND_DRIFTING: text(bg, 6, 7, "DRIFTING"); break;
+    case LAND_TILTED:   text(bg, 7, 7, "TILTED");   break;
+    default:            text(bg, 7, 7, "NO PAD");   break;
+    }
+    text(bg, 3, 13, "START NEW LIFE");
+    text(bg, 4, 15, "SELECT TITLE");
 }
 
 /* ------------------------------------------------------------------ sound
@@ -1227,12 +1321,19 @@ void main(void)
         pressed = (uint8_t)(keys & ~prev_keys);
         prev_keys = keys;
 
-        /* SELECT IN FLIGHT IS THE WAY BACK OUT.  Handled HERE, ahead of both
-         * screen branches, and not from inside the play one: the tick that
-         * leaves the field has to be the tick that builds the title, and run
-         * from the play branch the title branch above has already been passed
-         * for this tick -- the field would be re-drawn, one tick stale, under a
-         * title built on top of it.
+        /* SELECT IS THE WAY BACK OUT, from the field AND from an ending page.
+         * Handled HERE, ahead of both screen branches, and not from inside
+         * either one: the tick that leaves the field has to be the tick that
+         * builds the title, and run from the play branch the title branch above
+         * has already been passed for this tick -- the field would be re-drawn,
+         * one tick stale, under a title built on top of it.
+         *
+         * THE GATE IS `not the title` RATHER THAN `the field`, and that is one
+         * condition serving both screens an ending leaves behind.  Everything
+         * the four lines below do is about LEAVING a scrolled, moving screen for
+         * a still menu -- and a page is as much of a screen to leave as the
+         * field is, so a gate that named ST_PLAY would have left an ending
+         * unable to answer SELECT at all.
          *
          * THE SELECT BIT IS CLEARED ON THE WAY OUT and that is load-bearing
          * rather than tidy: the title's own SELECT is the mode toggle just
@@ -1246,7 +1347,7 @@ void main(void)
          * those to the window IS the clear.  A 20x18 map write is a three-frame
          * stall (see the note below), which is fine for a menu press paid
          * once. */
-        if (game == ST_PLAY && (pressed & J_SELECT)) {
+        if (game != ST_TITLE && (pressed & J_SELECT)) {
             pressed &= (uint8_t)~J_SELECT;
             game = ST_TITLE;
             SCY_REG = 0;
@@ -1292,6 +1393,26 @@ void main(void)
                 build_field();
             }
         }
+
+        /* The ending page, which is a dead end until the player leaves it.
+         * START takes it back to the field on the SAME tick -- the play branch
+         * below is what spawns the ship, exactly as it does when the title
+         * hands over, so ship_init() still exists in one place and the new life
+         * opens on the press rather than a tick after it.
+         *
+         * NO build_field() HERE, unlike the title's START, and the difference
+         * is where the world comes from.  The title is where the mode is
+         * chosen, so it has to open one; a page was reached from a field that
+         * was already open on the mode the player picked, and `terrain` and
+         * world_h still describe it.  The ring is not this branch's problem
+         * either: ship_init() raises ring_stale, and the play branch below
+         * rebuilds the band from the camera on this same tick.
+         *
+         * SELECT is not here.  Leaving for the title is the hand-over ABOVE,
+         * which already takes its own bit out of `pressed` -- one press, one
+         * screen. */
+        if (game == ST_END && (pressed & J_START))
+            game = ST_PLAY;
 
         if (game == ST_PLAY) {
             /* Decode the pad into sim.h's flags.  A and B are the main engine,
@@ -1406,6 +1527,57 @@ void main(void)
              * screen would ever say so; probe.p3_gravity asserts the sprite's
              * OAM bytes and the state's own agree instead. */
             ship_draw();
+
+            /* ---- the ending page ----------------------------------------
+             * The life is over and the field has stopped being the point, so
+             * the page replaces it -- ONCE, and the byte that makes it once is
+             * `game`: this sets ST_END, the play branch stops running, and
+             * nothing below is reached again until START or SELECT leaves.
+             *
+             * WHERE THIS SITS IS THE WHOLE OF WHEN THE PAGE APPEARS: after
+             * ship_draw(), so the ship's last resting frame or the burst's last
+             * frame has already been put up this tick and the page is what
+             * covers them, and inside the play branch, so it is the same tick's
+             * ship.state the branch above just wrote.
+             *
+             * A LANDING TURNS THE PAGE AT ONCE and a CRASH WAITS FOR THE BURST.
+             * That asymmetry is the burst's and not a preference: a landing is
+             * a ship at rest with nothing left to watch, while the explosion IS
+             * the death and a page over it would delete the one thing that says
+             * the ship was destroyed rather than merely stopped.  boom_frame()
+             * answers BOOM_STEPS exactly when the burst has run -- the same
+             * value ship_draw() reads to darken the slots -- so the page lands
+             * on the tick AFTER the last burst frame, and both use the one
+             * clock.  probe.p5_landing already samples that whole animation and
+             * now sees the page arrive behind it.
+             *
+             * THE WINDOW GOES WITH THE MAP.  The telemetry bar is the WINDOW
+             * layer and covers the screen's bottom two rows whatever the BG map
+             * holds, so blitting the page and leaving the bar would put frozen
+             * readings over the page's last two rows -- FUEL and an ALT of 0
+             * about a flight that has already ended.  bg_clear() has blanked
+             * those two buffer rows (both pages start at row 4), so this is the
+             * same "push the blanks" the title hand-over does.
+             *
+             * SCY = 0 MID-FRAME, like the SELECT hand-over above and for the
+             * same reason: in DESCENT the map is scrolled, and a page written
+             * at the top of an unscrolled map would be drawn off the top of the
+             * screen.  It is written outside the blanking window, which would
+             * tear an ordinary frame -- and it is not an ordinary frame, it is
+             * the one the whole screen is being replaced on, so there is no
+             * picture left for the tear to be visible in. */
+            if (ship.state == ST_LANDED ||
+                (ship.state == ST_CRASH && boom_frame() >= BOOM_STEPS)) {
+                game = ST_END;
+                SCY_REG = 0;
+                field_hide();
+                if (ship.state == ST_LANDED)
+                    build_landed();
+                else
+                    build_crashed();
+                set_bkg_tiles(0, 0, VIEW_W, VIEW_H, bg);
+                set_win_tiles(0, 0, VIEW_W, 2, bg);
+            }
         }
 
         frame++;

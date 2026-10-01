@@ -56,8 +56,9 @@ running countdown, and thrust does nothing at all once it reaches zero.
 
 ## Landing
 
-Put the ship down on a **pad** — a flat, marked platform. Coming to rest
-anywhere else is a crash, however gently you did it.
+Put the ship down on a **pad** — a flat, marked platform. The pads are the two
+bright, lit platforms; everything else on the ground is unmarked and fatal.
+Coming to rest anywhere but a pad is a crash, however gently you did it.
 
 Three more things have to be true at the moment you touch down:
 
@@ -87,9 +88,37 @@ begins at the point where the landing does.
 | LOW | left of centre | ×1 |
 | HIGH | right of centre | ×2 |
 
-The higher-value pad is the smaller one. Both are flat, and the HUD names the
-multiplier the whole time — the pad you are over while flying, and the one you
-landed on after.
+The higher-value pad is the smaller one. Both are flat and both are drawn as a
+lit deck, so where they are is something you can see rather than something you
+have to read off the bar — and the bar still names the multiplier of the pad you
+are over **while flying**. Which one you actually landed on is the ending page's
+job to say.
+
+## The end of a life
+
+Either ending takes over the whole screen with a page of its own.
+
+**LANDED** comes up the moment the ship settles on a pad, and says two things:
+the pad's multiplier — **X1** or **X2** — and **FUEL LEFT**, how much of the tank
+was still in it when you touched down. That number is the story of the flight: a
+life that spent 500 of its 600 units got down, but it got down by burning.
+
+**CRASHED** comes up once the ship has blown apart. The explosion plays out over
+the wreck first — that is the ship being destroyed, and it is worth watching —
+and then the page says why, in the game's own words:
+
+| It says | Because |
+|---|---|
+| **NO PAD** | you came down somewhere that is not a landing pad |
+| **TOO FAST** | you were still falling too quickly when you arrived |
+| **DRIFTING** | you were still moving sideways when you arrived |
+| **TILTED** | the nose was too far off vertical when you arrived |
+
+Only one is ever printed, and they are checked in that order — so a touchdown on
+ordinary ground reads **NO PAD** whatever else the arrival looked like.
+
+From either page, **START** opens a new life on the same world you were flying,
+and **SELECT** goes back to the title.
 
 ## What you're looking at
 
@@ -108,12 +137,15 @@ two rows, and everything below them is hidden:
 - **PAD X2** — the multiplier of the pad under you *right now*, while you are
   still flying. X2 over the small pad, X1 over the big one, and **X0 when there
   is no pad under you at all** — which is the spot you do not want to land on.
-- **LANDED X2** — you made it, and that is the pad's multiplier.
-- **CRASHED** — that life is over. The ship blows apart where it hit and is
-  gone a moment later. START begins a new one.
+- **CRASHED** — the ship has blown apart. It is on the bar only while the
+  explosion lasts; then a page takes over the screen — see **The end of a
+  life**.
 
 VX and VY read 0 until the ship is moving at least a whole pixel a frame, so
 early in a life they may still say 0 while the ship is drifting down slowly.
+
+An ending page clears the whole panel away along with the world: it is reading
+out a flight, and the flight is over.
 
 The ship itself is the little craft above the middle of the screen. In **LANDER**
 the view is fixed and the ship moves across it. In **DESCENT** the ship holds
@@ -136,6 +168,8 @@ changes how the game plays, and on anything else — a Game Boy, a Game Boy Colo
 an emulator that is not emulating a Super Game Boy — it is simply not there.
 
 ## If you keep crashing
+
+The crashed page names the one that got you. These are what to do about it:
 
 - **Landing hard on a pad?** Watch VY. It needs to be small by the time ALT
   reaches 0 — start slowing down while there is still height to do it in.

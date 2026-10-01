@@ -65,6 +65,7 @@ T_BLANK = 0
 T_TERRAIN = 1
 T_TERRAIN_TOP = 2
 T_STAR0, STAR_TILES = 3, 4      # mkgfx.py's star tiles, in the id gap
+T_PAD_TOP = 7                   # the landing deck, same row as T_TERRAIN_TOP
 T_DIGIT0, T_LETTER0, T_MINUS = 20, 30, 56
 
 # THE SKY IS A SET, NOT A TILE.  A cell above the surface is T_BLANK or one of
@@ -82,6 +83,15 @@ STAR_IDS = frozenset(range(T_STAR0, T_STAR0 + STAR_TILES))
 SKY_IDS = frozenset({T_BLANK}) | STAR_IDS
 MIN_STARS = 8
 
+# THE GROUND IS A SET TOO, as of the pad deck.  A column's surface row is
+# T_TERRAIN_TOP or T_PAD_TOP and its body is T_TERRAIN; the checks that only
+# want "which of these cells is ground" want all three, and the ones that ask
+# about a specific row ask surface_tile() instead.  Kept as a set rather than a
+# literal at each site so the deck cannot be forgotten in one of them -- which is
+# exactly the failure p1_boot's "nothing from an unloaded bank" check exists to
+# catch, and it would have caught this one by naming the pad deck a foreign tile.
+GROUND_IDS = frozenset({T_TERRAIN, T_TERRAIN_TOP, T_PAD_TOP})
+
 # terrain.h's geometry, mirrored for the same reason: tools/mklevel.py,
 # terrain.h and this file are the second three-way contract.  A probe that read
 # terrain.h could not tell a generator that gives the x2 pad the x1 row from one
@@ -93,6 +103,29 @@ WORLD_COLS = 20
 PAD_COUNT = 2
 PAD_ROW = {1: 15, 2: 12}        # multiplier -> the surface row that pad sits at,
                                 # for the LANDER profile p2_terrain runs against
+
+
+def rom_pads(g):
+    """terrain.h's pads[] exactly as the ROM was built with it."""
+    raw = g.var("pads", PAD_COUNT * 3)
+    return [(raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]) for i in range(PAD_COUNT)]
+
+
+def surface_tile(col, spans):
+    """main.c's row_blit(), one column of the surface row: the PAD deck on a pad
+    column, the ordinary crust everywhere else.
+
+    `spans` comes from rom_pads() -- the ROM's own table -- and not from a copy
+    of the pad columns kept here.  What every caller is asking is whether the
+    renderer agreed with the DATA, and two constants mirrored on both sides of
+    that question answer it wrongly: a pad that moved in terrain.h would move
+    the expectation with it and the check would pass on a screen still drawing
+    the deck where the pad used to be.
+    """
+    for c0, c1, _ in spans:
+        if c0 <= col <= c1:
+            return T_PAD_TOP
+    return T_TERRAIN_TOP
 
 # P9's number, mirrored for the same reason the tile ids are.  MAP_TILES is one
 # BG map (32x32), which was the bound a profile that did not fit had to be
@@ -142,7 +175,7 @@ HUD_BAR0, HUD_BAR1 = PLAY_H * 8, PLAY_H * 8 + 8        # those rows, in SCREEN p
 # is screen row PLAY_H.  Every read below therefore goes through the WINDOW map
 # and not the BG one -- the same tile id at the same (x, y) means two different
 # things in the two maps, which is exactly the confusion this phase is about.
-ST_TITLE, ST_PLAY = 0, 1
+ST_TITLE, ST_PLAY, ST_END = 0, 1, 2
 HUD_FUEL_ROW, HUD_FUEL_COL, HUD_FUEL_W = 0, 5, 3
 HUD_ALT_ROW, HUD_ALT_COL, HUD_ALT_W = 0, 13, 3
 # The target-pad indicator, on the velocity row: "PAD X" then the multiplier
@@ -156,6 +189,19 @@ HUD_VERDICT_ROW, HUD_VERDICT_COL = 1, 8
 # because the row is what a leftover from the last verdict shows up in, and a
 # leftover is invisible to a string search -- see the check below.
 HUD_VEL_ROW = "VX ddd VY ddd " + "PAD Xd"
+
+# THE TWO ENDING PAGES, main.c's layout for them, mirrored for the same reason
+# the HUD's is: where a number sits is part of the screen.  A page is in the BG
+# map and only in it -- the status bar's window rows are cleared with it -- so
+# every read of one goes through MAP0.
+#
+# The two prompts are shared by both pages and deliberately not constants here:
+# what a check asks of a page is the FACT it reports, and a check that spelled
+# out "START NEW LIFE" as well would fail on a wording change that broke
+# nothing.  What is pinned is where the fact is and what it says.
+PAGE_MULT_ROW, PAGE_MULT_COL = 7, 10      # LANDED's score, one digit, after "X"
+PAGE_FUEL_ROW, PAGE_FUEL_COL, PAGE_FUEL_W = 10, 13, 3
+PAGE_REASON_ROW = 7                       # CRASHED's named verdict
 
 FRAMES = 120                    # how long the tick-rate assertion runs
 
@@ -637,11 +683,11 @@ def p1_boot(g):
         for x in range(VIEW_W):
             t = g.tile(x, y)
             seen.add(t)
-            if t in (T_TERRAIN, T_TERRAIN_TOP):
+            if t in GROUND_IDS:
                 ground += 1
             elif t in STAR_IDS:
                 stars += 1
-    extra = sorted(seen - SKY_IDS - {T_TERRAIN, T_TERRAIN_TOP})
+    extra = sorted(seen - SKY_IDS - GROUND_IDS)
     check(not extra,
           "the first screen holds only generated tiles -- nothing from an "
           "unloaded bank (%r is on screen)" % extra)
@@ -683,11 +729,15 @@ def p2_terrain(g):
     # `terrain` is the selected profile POINTER, so this goes through it rather
     # than reading at the symbol -- see Game.active_profile().
     h = g.active_profile()
+    spans = rom_pads(g)
 
     # Every column's surface tile is at that column's terrain row.  This is the
-    # whole target: the renderer and the data agreeing, cell by cell.
+    # whole target: the renderer and the data agreeing, cell by cell.  The tile
+    # it should BE is surface_tile() -- crust, or the pad deck on a pad column --
+    # so this is also the check that the deck is drawn where the pads table says
+    # the pads are, and not one column off.
     bad = [(x, h[x], g.tile(x, h[x])) for x in range(WORLD_COLS)
-           if g.tile(x, h[x]) != T_TERRAIN_TOP]
+           if g.tile(x, h[x]) != surface_tile(x, spans)]
     check(not bad,
           "every column's surface tile is at its terrain[] row -- col:row:found "
           "%r" % bad[:5])
@@ -704,7 +754,7 @@ def p2_terrain(g):
             # SKY is a category and not one tile now -- see SKY_IDS.  Surface
             # and body are still exact: those two are the profile's answer.
             ok = (t in SKY_IDS if y < h[x] else
-                  t == T_TERRAIN_TOP if y == h[x] else t == T_TERRAIN)
+                  t == surface_tile(x, spans) if y == h[x] else t == T_TERRAIN)
             if not ok:
                 bad.append((x, y, "sky" if y < h[x] else h[x], t))
     check(not bad,
@@ -726,10 +776,14 @@ def p2_terrain(g):
             continue
         span = h[col0:col1 + 1]
         onscreen = [g.tile(x, h[x]) for x in range(col0, col1 + 1)]
-        check(span == [row] * len(span) and set(onscreen) == {T_TERRAIN_TOP},
+        # THE DECK, and not merely a flat run.  A pad drawn in the ordinary crust
+        # is a pad the player has no way to find except by holding the ship still
+        # and reading PAD X off the bar, which is what this check is here to stop
+        # coming back -- it fails a ROM whose flat run is drawn as plain ground.
+        check(span == [row] * len(span) and set(onscreen) == {T_PAD_TOP},
               "pad %d (cols %d..%d, x%d) is flat across its whole width at row "
-              "%d -- terrain %r, screen %r"
-              % (i, col0, col1, mult, row, span, onscreen))
+              "%d AND wears the deck tile -- terrain %r, screen %r (want %d)"
+              % (i, col0, col1, mult, row, span, onscreen, T_PAD_TOP))
 
 
 # ------------------------------------------------------------------ P3 -----
@@ -1425,21 +1479,24 @@ def p6_hud(g):
 
     # ---- the other ending, which is the one that shows a SCORE ------------
     # The descent burns whenever the ship is falling faster than VY_HOLD, the
-    # same pilot p5_landing flies.  What this reads is the digit the HUD
-    # decoded, against the multiplier the ROM's own pads table gives the column
-    # the ship landed on.
+    # same pilot p5_landing flies.  WHAT THIS READS NOW IS THE ENDING PAGE,
+    # because that is where a landing's score lives: the page is blitted on the
+    # tick the ship comes to rest and takes the status bar's window rows with it,
+    # so the strip's "LANDED X2" is a row that never survives a frame.  The
+    # claim is the same one it always was -- the screen scores the landing out
+    # of the ROM's own state -- and only the surface it is made on moved.
     ticks = 0
     while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
         g.run(1, "A" if g.ship()["vy"] > VY_HOLD else "")
         ticks += 1
     g.run(2)
     s = g.ship()
-    shown = g.hud_num(HUD_VERDICT_ROW, HUD_VERDICT_COL, 1)
-    check(s["state"] == ST_LANDED and bool(g.find_text("LANDED X", WIN0)) and
+    shown = g.hud_num(PAGE_MULT_ROW, PAGE_MULT_COL, 1, MAP0)
+    check(s["state"] == ST_LANDED and bool(g.find_text("LANDED", MAP0)) and
           shown == s["mult"] == 2,
-          "and a controlled descent lands and the HUD scores it -- state %d "
+          "and a controlled descent lands and the PAGE scores it -- state %d "
           "after %d ticks, showing %r, scored %d, %r"
-          % (s["state"], ticks, shown, s["mult"], g.find_text("LANDED X", WIN0)))
+          % (s["state"], ticks, shown, s["mult"], g.find_text("LANDED", MAP0)))
 
     # ---- the frame keeps its rate ----------------------------------------
     # The tick loop draws now -- a 40-tile HUD blitted on every iteration
@@ -1656,11 +1713,14 @@ def p9_window(g):
 
     # Column by column: the surface tile is where the OFFSET puts it -- on the
     # screen at row descent[x] - top, and at the ring slot that world row owns.
+    # The tile it should be is surface_tile() again: the DESCENT pads wear the
+    # same deck the LANDER ones do, on the same shared spans table.
+    spans = rom_pads(g)
     bad = []
     for x in range(WORLD_COLS):
         y = descent[x] - top
         got = g.tile(x, slot(descent[x])) if 0 <= y < VIEW_H else None
-        if got != T_TERRAIN_TOP:
+        if got != surface_tile(x, spans):
             bad.append((x, descent[x], y, got))
     check(not bad,
           "every column's surface tile is at terrain_descent[col] - %d -- "
@@ -1676,7 +1736,7 @@ def p9_window(g):
             wr = top + y
             got = g.tile(x, slot(wr))
             ok = (got in SKY_IDS if wr < descent[x] else
-                  got == T_TERRAIN_TOP if wr == descent[x] else
+                  got == surface_tile(x, spans) if wr == descent[x] else
                   got == T_TERRAIN)
             if not ok:
                 bad.append((x, y, wr, descent[x], got))
@@ -1938,6 +1998,11 @@ def p11_stream(g):
 
     descent = g.profile("terrain_descent")
 
+    # Read once and closed over: band_bad runs every sampled tick, and a pad
+    # table re-read out of the emulator's memory inside it would be the slowest
+    # thing in the sample loop.
+    spans = rom_pads(g)
+
     def band_bad(cam):
         """Every tile of the visible window against the world row the camera
         puts at that screen row, or [] if they all agree.
@@ -1961,7 +2026,7 @@ def p11_stream(g):
             for c in range(WORLD_COLS):
                 got = g.tile(c, mr)
                 ok = (got in SKY_IDS if wr < descent[c] else
-                      got == T_TERRAIN_TOP if wr == descent[c] else
+                      got == surface_tile(c, spans) if wr == descent[c] else
                       got == T_TERRAIN)
                 if not ok:
                     out.append((c, r, wr, mr, descent[c], got))
@@ -2410,6 +2475,7 @@ def p13_descent(g):
 
     lander = g.profile("terrain_lander")
     descent = g.profile("terrain_descent")
+    spans = rom_pads(g)          # closed over by band_bad, which runs per tick
     descent_h = (max(descent) + 1) * 8
     cam_max = descent_h - PLAY_H_PX
     lander_h = (max(lander) + 1) * 8
@@ -2449,7 +2515,7 @@ def p13_descent(g):
             for c in range(WORLD_COLS):
                 got = g.tile(c, mr)
                 ok = (got in SKY_IDS if wr < descent[c] else
-                      got == T_TERRAIN_TOP if wr == descent[c] else
+                      got == surface_tile(c, spans) if wr == descent[c] else
                       got == T_TERRAIN)
                 if not ok:
                     out.append((c, r, wr, mr, descent[c], got))
@@ -2485,6 +2551,15 @@ def p13_descent(g):
                 alt * BRAKE_DIV <= s["vy"] * s["vy"] * P13_BRAKE)
         g.run(1, "A" if burn else "")
         ticks += 1
+        # THE TICK THAT ENDS THE LIFE IS NOT SAMPLED.  It is the flight's last
+        # tick and not a frame of the field: the landing turns the ending page
+        # over on this same iteration, and the page is not a screen the camera
+        # draws -- it zeroes SCY (the map it is written into is unscrolled) and
+        # its 20x18 blit puts text where the band's terrain was.  Sampled, that
+        # reads as a camera that stopped following the ship and a ring that
+        # wrote the wrong world, on a screen neither of them is on any more.
+        if g.ship()["state"] != ST_FLY:
+            break
         cam, scy = g.u16("cam"), g.p.memory[SCY]
         samples.append((g.ship()["y"], cam, scy))
         # The band is read only where the tick's two halves AGREE -- the same
@@ -2906,13 +2981,238 @@ def p14_sgb_border(g):
           % (BANK1_END, map_off + BORDER_MAP_BYTES, len(rom)))
 
 
+# ---------------------------------------------------------------- P15 -------
+# main.c's two ending pages, as the words they spell, keyed by the verdict
+# sim.h's rule returns.  WRITTEN DOWN HERE AND NOT READ OFF THE ROM, which is
+# the whole power of the check below: the claim is that the page NAMES THE
+# VERDICT THE RULE COMPUTED, and a probe that read the page's own tiles back to
+# itself would agree with any page at all -- including one that said "TOO FAST"
+# for every crash there is.
+PAGE_CRASH_REASON = {
+    LAND_TOO_FAST: "TOO FAST",
+    LAND_DRIFTING: "DRIFTING",
+    LAND_TILTED:   "TILTED",
+    LAND_CRASH:    "NO PAD",
+}
+
+
+def p15_ending(g):
+    """A finished life gets a screen of its own: LANDED with what it scored and
+    what it had left, CRASHED with the reason sim.h's rule gave it.
+
+    WHAT IS PINNED IS WHAT THE PAGE SAYS, in the BG map through this file's own
+    copy of the font ids.  The layout and the colour of it are owed to an
+    eyeball like the border is; what can be read is that the right screen comes
+    up, at the right moment, carrying the ROM's own numbers.
+
+    THE TIMING IS HALF OF IT, and it is the half a screen cannot be looked at
+    and judged for.  A crash has a burst and the page must not delete it: the
+    field stays the screen for the whole animation, all four frames of it, and
+    the page arrives on the tick after the last one.  A landing has nothing to
+    watch, so it turns the page on the tick it happens -- and the check samples
+    the frame that follows rather than the one that blitted, because the map
+    the PPU was told about ripens a frame late, the same one-vblank relationship
+    every other reading in this file allows for.
+
+    TWO CRASHES, WITH DIFFERENT REASONS, and that is the point of the second
+    one: one verdict proves the page says something, two prove it says what the
+    rule said.  The pilot is the lazy one -- the stick held over for the whole
+    fall -- so which of the four reasons comes out is not scripted, and the
+    check asks the ROM's own ship.verdict which word to look for rather than
+    assuming.  DRIFTING and TILTED are not guaranteed to appear; what is
+    asserted is that every crash's page names ITS verdict, whatever it was.
+
+    START and SELECT are the same two exits the field has: START a new life on
+    the field, SELECT back to the title.  Both are pressed from the page, which
+    is the only place the ST_END branch exists to be reached from.
+    """
+    print("P15 ending")
+    # A symbol this phase reads being ABSENT is an assertion failure, not a
+    # harness error: that is the power gate on an older ROM and it answers 1.
+    if not g.need("game", "ship", "terrain"):
+        return
+
+    boot = g.boot()
+    if not check(0 < boot < GRAV_POLL,
+                 "the ROM reached its own tick loop (frame is counting after "
+                 "%d frames)" % boot):
+        return
+    g.play()
+    check(g.var("game") == ST_PLAY,
+          "the field is what a life starts on (game %d)" % g.var("game"))
+
+    def window_blank():
+        """Both telemetry rows, tile by tile -- the page has to take the status
+        bar with it, and an empty string search is not that: the bar's labels
+        are the only thing find_text() can see, and a strip of leftover DIGITS
+        would read as no bar at all."""
+        return all(g.tile(x, r, WIN0) == T_BLANK
+                   for r in range(HUD_H) for x in range(VIEW_W))
+
+    # ---- the crash, which the burst gets to finish first ------------------
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DROP_LIMIT:
+        g.run(1)
+        ticks += 1
+    s = g.ship()
+    check(s["state"] == ST_CRASH,
+          "a hard drop wrecks the ship (state %d after %d ticks)" % (s["state"], ticks))
+
+    # Sampled every tick from the wreck until the page arrives, collecting the
+    # burst frames that were DRAWN.  All four have to be, and the page must not
+    # be up while any of them is: a page blitted on the crash tick would leave
+    # an explosion nothing ever looked at, and this is the only thing that can
+    # tell the two orderings apart.
+    frames = set()
+    for _ in range(BOOM_TICKS * 4):
+        g.run(1)
+        t = g.oam(0)[2]
+        if SPR_BOOM0 <= t < SPR_BOOM0 + BOOM_STEPS * BOOM_TILES:
+            frames.add((t - SPR_BOOM0) // BOOM_TILES)
+        if g.var("game") != ST_PLAY:
+            break
+    check(sorted(frames) == list(range(BOOM_STEPS)),
+          "the field stays the screen for the whole burst -- every one of its "
+          "%d frames was drawn before the page came over it (%r)"
+          % (BOOM_STEPS, sorted(frames)))
+
+    # THE BLIT RIPENS A FRAME LATE, the same one-vblank relationship every other
+    # reading in this file allows for: the loop above leaves on the iteration
+    # that turned the page over, and the tilemap the emulator hands back is what
+    # the frame drawn from it holds.  Reading the map on the leaving tick reads
+    # the field -- which is a page that "was never drawn", and the two ticks
+    # below are what tells that apart from one.
+    g.run(2)
+
+    check(g.var("game") == ST_END,
+          "and then the crash turns the page (game %d)" % g.var("game"))
+    v = g.ship()["verdict"]
+    want = PAGE_CRASH_REASON.get(v)
+    check(bool(g.find_text("CRASHED", MAP0)) and
+          want is not None and bool(g.find_text(want, MAP0)),
+          "the page says CRASHED and names the reason sim.h's rule gave it -- "
+          "verdict %d, the page spells %r, looking for %r"
+          % (v, g.find_text(want or "", MAP0), want))
+    check(window_blank(),
+          "and the status bar goes with the world rather than sitting over the "
+          "page's last two rows (window rows blank: %s)" % window_blank())
+    check(all(g.oam(slot)[0] == 0 for slot in range(BOOM_TILES)),
+          "and nothing is left of the burst over it (%r)"
+          % [g.oam(slot)[0] for slot in range(BOOM_TILES)])
+    check(g.p.memory[SCY] == 0,
+          "and the page is not scrolled -- SCY is the field's and the page is "
+          "written into an unscrolled map (SCY %d)" % g.p.memory[SCY])
+
+    # ---- START takes the page back to the field --------------------------
+    g.play()
+    s = g.ship()
+    check(g.var("game") == ST_PLAY and s["state"] == ST_FLY and
+          s["fuel"] == FUEL_START,
+          "START leaves the page for a NEW life rather than the old one -- the "
+          "field with the ship falling and a full tank (game %d, state %d, "
+          "fuel %d)" % (g.var("game"), s["state"], s["fuel"]))
+    check(g.find_text("CRASHED", MAP0) == [] and window_blank() is False,
+          "and the page is gone with it -- no heading left in the BG map and "
+          "the telemetry back in the window (%r, bar blank %s)"
+          % (g.find_text("CRASHED", MAP0), window_blank()))
+
+    # ---- ...and SELECT takes it to the title -----------------------------
+    # Driven from the page and not from the field, which is where the ST_END
+    # branch is reachable: the same press has to work from both, and a gate
+    # written as `game == ST_PLAY` would leave a player who finished a life
+    # unable to leave it at all.
+    #
+    # The life the START above opened is still falling, so this is the same hard
+    # drop over again rather than a fresh press -- and a second crash reaching
+    # its page is the other half of what this section is for: the page came up
+    # once already, and a transition that only worked the first time would be a
+    # blit that never got re-armed.
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DROP_LIMIT:
+        g.run(1)
+        ticks += 1
+    g.run(BOOM_TICKS + 2)               # the burst, then the page
+    check(g.var("game") == ST_END,
+          "a second crash reaches its page too (game %d)" % g.var("game"))
+    g.run(6, "T")                       # SELECT: the title (an EDGE)
+    g.run(4)
+    check(g.var("game") == ST_TITLE and bool(g.find_text("LUNA LANDEER", MAP0)),
+          "and SELECT leaves the page for the title -- game %d, %r"
+          % (g.var("game"), g.find_text("LUNA LANDEER", MAP0)))
+
+    # ---- the other ending, and a SECOND REASON ---------------------------
+    # A different crash on purpose.  This pilot holds RIGHT for the whole fall
+    # and brakes with A whenever it is falling faster than VY_HOLD, so which
+    # reason it earns depends on where the drift happens to put it -- onto a pad
+    # sideways (DRIFTING) or onto ground that is not one (NO PAD).  Either is a
+    # different arm of the page's switch from the hard drop's TOO_FAST, and
+    # which one it is, is the ROM's business: the check reads the verdict back
+    # and looks for that word.  THE BRAKE IS WHAT MAKES IT NOT TOO_FAST, because
+    # TOO_FAST is checked ahead of both of the reasons this can reach.
+    g.play()
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1, "AR" if g.ship()["vy"] > VY_HOLD else "R")
+        ticks += 1
+    g.run(BOOM_TICKS + 2)
+    s = g.ship()
+    check(s["state"] == ST_CRASH and g.var("game") == ST_END,
+          "a drift into the ground wrecks and reaches its page as well (state "
+          "%d, verdict %d, game %d after %d ticks)"
+          % (s["state"], s["verdict"], g.var("game"), ticks))
+    v2 = s["verdict"]
+    want2 = PAGE_CRASH_REASON.get(v2)
+    check(want2 is not None and bool(g.find_text(want2, MAP0)) and
+          g.find_text("CRASHED", MAP0),
+          "and THAT page names THAT verdict -- verdict %d, spelling %r, the "
+          "page %r" % (v2, want2, g.find_text(want2 or "", MAP0)))
+    check(v2 != v,
+          "which is a DIFFERENT reason from the first crash, so the page is "
+          "reading the verdict rather than repeating a word (%d then %d)"
+          % (v, v2))
+
+    # ---- the landing page ------------------------------------------------
+    # The soft descent p5_landing and p6_hud fly: burn whenever the ship is
+    # falling faster than VY_HOLD, straight down the column it spawned on, so
+    # the multiplier and the tank below are the ROM's own readings of a landing
+    # it just made.
+    g.play()
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1, "A" if g.ship()["vy"] > VY_HOLD else "")
+        ticks += 1
+    g.run(2)                            # the blit, and the frame it ripens on
+    s = g.ship()
+    check(s["state"] == ST_LANDED and g.var("game") == ST_END and
+          bool(g.find_text("LANDED", MAP0)),
+          "a controlled descent lands and the page comes up AT ONCE -- nothing "
+          "to watch, so there is no burst to wait for (state %d, game %d, "
+          "verdict %d, page %r)"
+          % (s["state"], g.var("game"), s["verdict"], g.find_text("LANDED", MAP0)))
+    shown = g.hud_num(PAGE_MULT_ROW, PAGE_MULT_COL, 1, MAP0)
+    check(shown == s["mult"] and shown == 2,
+          "and its score is the multiplier the landing earned -- x%d read off "
+          "the page, ship.mult %d" % (shown or 0, s["mult"]))
+    fuel = g.hud_num(PAGE_FUEL_ROW, PAGE_FUEL_COL, PAGE_FUEL_W, MAP0)
+    check(fuel == s["fuel"],
+          "and FUEL LEFT is the tank it landed with, to the unit -- the page is "
+          "written once and never rebuilt, so there is no lag to allow for "
+          "(%r against %d)" % (fuel, s["fuel"]))
+    check(window_blank() and g.p.memory[SCY] == 0 and
+          all(g.oam(slot)[0] == 0 for slot in range(BOOM_TILES)),
+          "and the landing page takes the world with it too -- bar blank %s, "
+          "SCY %d, sprites %r"
+          % (window_blank(), g.p.memory[SCY],
+             [g.oam(slot)[0] for slot in range(BOOM_TILES)]))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
           ("p7_sound", p7_sound), ("p9_window", p9_window),
           ("p10_camera", p10_camera), ("p11_stream", p11_stream),
           ("p12_mode", p12_mode), ("p13_descent", p13_descent),
-          ("p14_sgb_border", p14_sgb_border)]
+          ("p14_sgb_border", p14_sgb_border), ("p15_ending", p15_ending)]
 
 
 def main(rom, mapfile, only=None):
