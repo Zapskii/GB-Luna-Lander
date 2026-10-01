@@ -42,6 +42,13 @@ LCDC = 0xFF40
 LCDC_ON = 0x80                  # bit 7: the display.  While it is set the PPU
                                 # locks VRAM, which is the whole of p1_boot's
                                 # second assertion.
+OAM = 0xFE00                    # 4 bytes per slot: y, x, tile, attrs
+OAM_DY, OAM_DX = 16, 8          # an 8x8 sprite DRAWS at (x-8, y-16), so the
+                                # raw OAM byte is the position plus this.
+                                # Reading the raw byte and comparing it to the
+                                # ship's own y is the point: it is the only way
+                                # to tell "the renderer reads the state" from
+                                # "the renderer keeps its own copy".
 
 # gfx.h's ids, mirrored here on purpose: mkgfx.py, gfx.h and this file are a
 # three-way contract, and a probe that asked gfx.h for them could not tell a
@@ -63,6 +70,23 @@ PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at
 
 FRAMES = 120                    # how long the tick-rate assertion runs
 
+# sim.h's Ship, as SDCC laid it out -- offsets taken from the compiler's own
+# CDB record for it (`T:Fmain$__00000005[...]` in luna.cdb), not guessed:
+#   x @0 (u16)  y @2 (u16)  xf @4  yf @5  vx @6 (i16)  vy @8 (i16)  = 10 bytes
+# Mirrored here for the same reason the tile ids are: a probe that asked sim.h
+# for its own struct could not tell a reordered struct from a correct one, and
+# reordering it is exactly how the fraction byte ends up somewhere this check
+# is not looking.
+SHIP_LEN = 10
+SHIP_X, SHIP_Y, SHIP_XF, SHIP_YF, SHIP_VX, SHIP_VY = 0, 2, 4, 5, 6, 8
+
+# sim.h's gravity knob, mirrored.  P5 retunes the feel and WILL move this; the
+# p3_gravity identity below is what has to keep holding when it does.
+GRAV = 16
+
+GRAV_SPAN = 8                   # ticks between the two position samples
+GRAV_POLL = 400                 # frames to wait for the cartridge to start
+
 
 def parse_map(path):
     """`     0000C0B6  Fmain$frame$0$0   main$` -> {'frame': 0xC0B6}.
@@ -83,6 +107,7 @@ def check(cond, msg):
     print("  %s  %s" % ("ok  " if cond else "FAIL", msg))
     if not cond:
         fails.append(msg)
+    return cond
 
 
 class Game:
@@ -109,6 +134,25 @@ class Game:
     def u16(self, name):
         b = self.p.memory[self.addr[name]:self.addr[name] + 2]
         return b[0] | (b[1] << 8)
+
+    def ship(self):
+        """The ship's own state, field by field (see the offset table above)."""
+        b = self.var("ship", SHIP_LEN)
+
+        def u16(i):
+            return b[i] | (b[i + 1] << 8)
+
+        def s16(i):
+            v = u16(i)
+            return v - 0x10000 if v & 0x8000 else v
+
+        return {"x": u16(SHIP_X), "y": u16(SHIP_Y),
+                "xf": b[SHIP_XF], "yf": b[SHIP_YF],
+                "vx": s16(SHIP_VX), "vy": s16(SHIP_VY)}
+
+    def oam(self, slot=0):
+        """The raw OAM bytes for one sprite slot: y, x, tile, attrs."""
+        return list(self.p.memory[OAM + 4 * slot:OAM + 4 * slot + 4])
 
     def tile(self, x, y):
         return self.p.memory[MAP0 + y * MAP_W + x]
@@ -271,7 +315,102 @@ def p2_terrain(g):
               % (i, col0, col1, mult, row, span, onscreen))
 
 
-CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain)]
+# ------------------------------------------------------------------ P3 -----
+def p3_gravity(g):
+    """The ship falls, the fall is sub-pixel, and the sprite is drawn from the
+    state rather than from a second copy of the position.
+
+    Three things can be wrong here and only one of them is visible.  The render
+    can track its own y (the sprite slides slowly away from the physics), and
+    the fraction byte can live in ship_step()'s LOCALS instead of in the state
+    -- which still moves the ship at every whole pixel but throws the sub-pixel
+    remainder away, so it reads as "the physics is fine, it is just chunky".
+    Neither is a screenshot.
+    """
+    print("P3 gravity")
+    # A symbol this phase introduces being ABSENT is an assertion failure, not
+    # a harness error -- that is the power gate on an older ROM (P2's has no
+    # ship at all) and it has to answer 1, not 2.
+    if not g.need("ship"):
+        return
+
+    # PyBoy runs the real boot ROM first, and that is a couple of seconds of
+    # the CARTRIDGE not existing yet -- p1_boot's 150 frames covers it, and a
+    # read before it returns nothing but zeroes.  This cannot simply run 150
+    # frames and look, though: the ship starts falling on the cartridge's first
+    # tick, so by then it has been falling for a second and a half and its y
+    # has been round the 16-bit wrap.  Poll for the ROM's own loop instead --
+    # `frame` is 0 until crt0 has run main() -- and sample from there.
+    boot = 0
+    while g.u16("frame") == 0 and boot < GRAV_POLL:
+        g.run(1)
+        boot += 1
+    if not check(0 < boot < GRAV_POLL,
+                 "the ROM reached its own tick loop (frame is counting after "
+                 "%d frames)" % boot):
+        return
+
+    a = g.ship()
+    g.run(GRAV_SPAN)
+    b = g.ship()
+
+    # The whole-pixel part advances.  (Masked to a byte: OAM holds a byte, and
+    # move_sprite() is what does the truncation.)
+    check(b["y"] > a["y"],
+          "the ship's whole-pixel y advances as it falls (%d -> %d)"
+          % (a["y"], b["y"]))
+
+    # ... and the sprite is AT the state.  This is the assertion that fails if
+    # main.c ever tracks a position of its own: the two would agree at first
+    # and drift apart from there, and no tilemap or screenshot check can see it.
+    #
+    # One tick of slack, and no more.  move_sprite() writes GBDK's SHADOW OAM;
+    # that only reaches the PPU's 0xFE00 on a vblank, so the bytes the hardware
+    # is showing at any instant were written on the PREVIOUS tick -- this
+    # compares the state read before a tick against the OAM read after it.  The
+    # slack is in the phase, never in the value: a sprite that is ahead of the
+    # state, parked, or missing its +8/+16 offset fails on every tick.
+    bad = []
+    for _ in range(12):
+        s = g.ship()
+        g.run(1)
+        oy, ox = g.oam()[:2]
+        if oy != ((s["y"] + OAM_DY) & 0xFF) or ox != ((s["x"] + OAM_DX) & 0xFF):
+            bad.append((s["y"], oy, s["x"], ox))
+    check(not bad,
+          "the sprite shows the ship's own position, one vblank behind -- "
+          "state y/OAM y/state x/OAM x mismatches %r" % (bad[:4],))
+
+    # The 8.8 position moved by EXACTLY the integral of the velocity ramp over
+    # the ticks between the two samples: sum of (v + GRAV*i) for i = 1..k.
+    # This is the assertion the trap fails.  With the fraction byte in a local,
+    # every tick returns v >> 8 and the remainders are discarded, so the ship
+    # travels the sum of the whole-pixel parts instead -- roughly half of the
+    # correct distance by here, and the only place that shows up is this number.
+    k = (b["vy"] - a["vy"]) // GRAV
+    got = (b["y"] - a["y"]) * 256 + (b["yf"] - a["yf"])
+    want = k * a["vy"] + GRAV * k * (k + 1) // 2
+    check(k > 0 and b["vy"] - a["vy"] == k * GRAV and got == want,
+          "the 8.8 position advanced by the exact integral of the velocity "
+          "ramp over %d ticks: got %d/256 px, want %d/256 px (vy %d -> %d)"
+          % (k, got, want, a["vy"], b["vy"]))
+
+    # ... and the fraction byte is ALIVE: it is non-zero on ticks where the
+    # whole-pixel y has not moved.  A `frac` in a local leaves this byte at 0
+    # for the whole run, which is the same statement as the line above from the
+    # other side.  Four consecutive ticks rather than one because yf happens to
+    # be 0 on the tick the 8.8 position lands exactly on a pixel boundary, and
+    # four in a row cannot all land there for any sane gravity.
+    live = 0
+    for _ in range(4):
+        g.run(1)
+        live += 1 if g.ship()["yf"] else 0
+    check(live, "the ship state's fraction byte is carrying the sub-pixel "
+                "remainder between ticks (yf was 0 on all 4 sampled ticks)")
+
+
+CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
+          ("p3_gravity", p3_gravity)]
 
 
 def main(rom, mapfile, only=None):
