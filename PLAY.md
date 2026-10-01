@@ -91,9 +91,9 @@ the ground:
 VX and VY read 0 until the ship is moving at least a whole pixel a frame, so
 early in a life they may still say 0 while the ship is drifting down slowly.
 
-The ship itself is the little craft in the middle of the sky; the terrain below
-it scrolls past as the ship moves, and the whole 160-pixel world wraps around at
-the edges.
+The ship itself is the little craft in the middle of the sky. The view is fixed
+and the ship moves across it; the whole 160-pixel world wraps around at the
+edges, so flying off the left takes you to the right.
 
 ## If you keep crashing
 
