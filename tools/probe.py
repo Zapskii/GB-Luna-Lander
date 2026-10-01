@@ -56,6 +56,7 @@ OAM_DY, OAM_DX = 16, 8          # an 8x8 sprite DRAWS at (x-8, y-16), so the
 T_BLANK = 0
 T_TERRAIN = 1
 T_TERRAIN_TOP = 2
+T_DIGIT0, T_LETTER0, T_MINUS = 20, 30, 56
 
 # terrain.h's geometry, mirrored for the same reason: tools/mklevel.py,
 # terrain.h and this file are the second three-way contract.  A probe that read
@@ -67,6 +68,24 @@ T_TERRAIN_TOP = 2
 WORLD_COLS = 20
 PAD_COUNT = 2
 PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at
+
+# main.c's screen state and its HUD layout, mirrored for the same reason the
+# tile ids are.  Where a number SITS is part of the HUD, not a detail of it: a
+# HUD that drew the right tank in the wrong row of the map is a bug, and this is
+# the file that has to be able to see it, so the layout is written down here
+# rather than derived from the ROM.
+ST_TITLE, ST_PLAY = 0, 1
+HUD_H = 2                       # the rows the HUD owns at the top of the field
+HUD_FUEL_ROW, HUD_FUEL_COL, HUD_FUEL_W = 0, 5, 3
+HUD_ALT_ROW, HUD_ALT_COL, HUD_ALT_W = 0, 13, 3
+# Where the verdict lands in the strip once the life is over: the row the
+# velocities are on, which is the row the outcome replaces.
+HUD_VERDICT_ROW, HUD_VERDICT_COL = 1, 8
+# That whole row, tile by tile, as the layout main.c writes it: 'd' is a digit
+# and every other character is the tile the layout puts there.  Written out
+# because the row is what a leftover from the last verdict shows up in, and a
+# leftover is invisible to a string search -- see the check below.
+HUD_VEL_ROW = "VX ddd VY ddd" + " " * (VIEW_W - 13)
 
 FRAMES = 120                    # how long the tick-rate assertion runs
 
@@ -138,6 +157,26 @@ GRAV_SPAN = 8                   # ticks between the two position samples
 GRAV_POLL = 400                 # frames to wait for the cartridge to start
 
 THRUST_SPAN = 8                 # ticks to hold the button in p4_thrust
+
+
+def glyph(c):
+    """Character -> its tile id, the probe's OWN copy of main.c's glyph().
+
+    Deliberately not imported from anywhere: the check below is that the
+    tilemap spells the title, and a decoder that asked the ROM which id 'A' is
+    could not tell a font that renumbered the letters from one that did not.
+    Anything outside this map has no tile, which is exactly the set main.c
+    sends to T_BLANK -- a lowercase literal decodes as a hole, not as a
+    character, so this raises rather than quietly answering blank."""
+    if "A" <= c <= "Z":
+        return ord(c) - ord("A") + T_LETTER0
+    if "0" <= c <= "9":
+        return ord(c) - ord("0") + T_DIGIT0
+    if c == "-":
+        return T_MINUS
+    if c == " ":
+        return T_BLANK
+    raise ValueError("no tile for %r" % c)
 
 
 def parse_map(path):
@@ -229,6 +268,33 @@ class Game:
     def tile(self, x, y):
         return self.p.memory[MAP0 + y * MAP_W + x]
 
+    def find_text(self, s):
+        """Every (row, col) where the tilemap spells `s`, through this file's
+        own copy of the font ids.  An empty list is "the string is not on the
+        screen", which is what a title that was never drawn answers."""
+        want = [glyph(c) for c in s]
+        hits = []
+        for y in range(VIEW_H):
+            row = [self.tile(x, y) for x in range(MAP_W)]
+            for x in range(MAP_W - len(want) + 1):
+                if row[x:x + len(want)] == want:
+                    hits.append((y, x))
+        return hits
+
+    def hud_num(self, row, col, w):
+        """The number in the `w` digit tiles at (col,row), or None if they are
+        not all digits -- a blank, a letter or a tile from an unloaded bank.
+        Read off the SCREEN rather than out of main.c's `bg`, which is the
+        whole point: it is what the PPU was told, after the tile ids went
+        through the font."""
+        v = 0
+        for i in range(w):
+            t = self.tile(col + i, row)
+            if not T_DIGIT0 <= t < T_DIGIT0 + 10:
+                return None
+            v = v * 10 + (t - T_DIGIT0)
+        return v
+
     def lcdc(self):
         return self.p.memory[LCDC]
 
@@ -241,12 +307,17 @@ class Game:
             for k in ks:
                 self.p.button_release(k)
 
-    def start(self, boot=150, settle=30):
-        """Boot, then tap START.  START is held across several frames because
-        PyBoy swallows input for a few ticks after its own boot splash.  P1 has
-        no title screen to press through, so this is the seam later phases use
-        and nothing here depends on it."""
-        self.run(boot)
+    def play(self, settle=2):
+        """Clear the title with START, so the checks that are about the play
+        field are looking at the play field.
+
+        START is held for several frames because PyBoy swallows input for a
+        few ticks after its own boot splash, and one of those frames has to be
+        the EDGE main.c reads.  `settle` is kept SHORT on purpose: the ship is
+        falling from the tick the title goes away, and a check that sampled it
+        30 ticks later would be sampling a ship already most of the way down.
+        An older ROM has no title to clear and simply restarts the life, which
+        is why this is safe to call on one."""
         self.run(8, "S")
         self.run(settle)
 
@@ -256,9 +327,12 @@ def p1_boot(g):
     """The ROM boots, ticks once per emulated frame, and draws the generated
     terrain -- with the tile load done before the display went on.
 
-    Raw, with no start() helper: P1 has no title screen, so there is nothing to
-    press, and pressing START to reach the screen would make this unable to tell
-    a ROM that boots from one that needs a button first.
+    The boot-level half is raw: nothing is pressed, because "the ROM ticks
+    without a hand on it" is a claim about the boot and is the one thing here
+    that START would paper over.  The screen half is behind one START as of P6,
+    where the ROM legitimately boots to a TITLE rather than to the field -- so
+    the terrain assertions moved to the field the phase's gameplay lives on
+    instead of being weakened to fit a screen they are not about.
     """
     print("P1 boot")
     if not g.need("frame", "lcdc_at_load"):
@@ -294,10 +368,16 @@ def p1_boot(g):
     check(now & LCDC_ON == LCDC_ON,
           "and the display is on once the boot is done (LCDC 0x%02X)" % now)
 
-    # The screen that boot leaves behind.  The tilemap records WHICH id was
-    # written, never whether the bank behind it holds the art -- which is why
-    # T_TERRAIN is a flecked tile and not a flat fill: a flat fill and an
-    # unloaded bank look identical on a screenshot.
+    # The screen the game opens on is the TITLE, and P6 is the phase that owns
+    # it -- but the boot-level claim below is about the field, so it presses
+    # through the title rather than asserting anything about it (p6_hud does
+    # that, with the font).
+    g.play()
+
+    # The screen behind the title.  The tilemap records WHICH id was written,
+    # never whether the bank behind it holds the art -- which is why T_TERRAIN
+    # is a flecked tile and not a flat fill: a flat fill and an unloaded bank
+    # look identical on a screenshot.
     #
     # P1 filled the whole map, so the whole view was the terrain tile here.  P2
     # blits the height profile over it and puts sky above the surface, so "the
@@ -305,9 +385,14 @@ def p1_boot(g):
     # survives both -- not deleted, because the one thing it proves that no
     # other check does is that the generated id reached the map at all.  P2
     # owns the layout now (see p2_terrain); this keeps the boot-level claim.
+    #
+    # The top two rows are the HUD as of P6, so the region this reads is below
+    # them: the HUD is a strip of font tiles over sky, and a check that called
+    # those "a tile from an unloaded bank" would be describing the HUD, not the
+    # terrain.
     seen = set()
     ground = 0
-    for y in range(VIEW_H):
+    for y in range(HUD_H, VIEW_H):
         for x in range(VIEW_W):
             t = g.tile(x, y)
             seen.add(t)
@@ -319,7 +404,7 @@ def p1_boot(g):
           "unloaded bank (%r is on screen)" % extra)
     check(ground >= VIEW_W,
           "and the generated ground is really drawn (%d of %d cells, at least "
-          "one surface tile per column)" % (ground, VIEW_W * VIEW_H))
+          "one surface tile per column)" % (ground, VIEW_W * (VIEW_H - HUD_H)))
 
 
 # ------------------------------------------------------------------ P2 -----
@@ -340,6 +425,7 @@ def p2_terrain(g):
         return
 
     g.run(150)                          # let main() run and blit
+    g.play()                            # P6: past the title, onto the field
 
     # Read the level out of the ROM's OWN memory, not out of terrain.h.  The
     # question is what the ROM was BUILT with, and a probe that read the header
@@ -355,9 +441,13 @@ def p2_terrain(g):
           "%r" % bad[:5])
 
     # ...and the rest of the column follows from it: sky above, body below.
+    # Starts BELOW the HUD strip, which P6 draws over the top two rows of every
+    # column.  Those rows are sky in all of them (the highest surface row is 9,
+    # well under the strip), so this skips text rather than terrain: the rows
+    # the surface can actually reach are all still checked, in every column.
     bad = []
     for x in range(WORLD_COLS):
-        for y in range(VIEW_H):
+        for y in range(HUD_H, VIEW_H):
             want = (T_BLANK if y < h[x] else
                     T_TERRAIN_TOP if y == h[x] else T_TERRAIN)
             if g.tile(x, y) != want:
@@ -416,6 +506,12 @@ def p3_gravity(g):
                  "%d frames)" % boot):
         return
 
+    # P6: the ROM opens on the title, where the ship is parked and the physics
+    # is not running -- so the boot poll above finds the loop, and START is what
+    # starts the fall.  Every check below is a differential or a spawn reading,
+    # so the couple of ticks this costs change nothing.
+    g.play()
+
     a = g.ship()
     g.run(GRAV_SPAN)
     b = g.ship()
@@ -430,22 +526,34 @@ def p3_gravity(g):
     # main.c ever tracks a position of its own: the two would agree at first
     # and drift apart from there, and no tilemap or screenshot check can see it.
     #
-    # One tick of slack, and no more.  move_sprite() writes GBDK's SHADOW OAM;
-    # that only reaches the PPU's 0xFE00 on a vblank, so the bytes the hardware
-    # is showing at any instant were written on the PREVIOUS tick -- this
-    # compares the state read before a tick against the OAM read after it.  The
-    # slack is in the phase, never in the value: a sprite that is ahead of the
-    # state, parked, or missing its +8/+16 offset fails on every tick.
+    # One tick of slack, and no more.  move_sprite() writes GBDK's SHADOW OAM
+    # and only a vblank copies it to 0xFE00, and that vblank falls within a
+    # handful of instructions of the frame boundary this file samples at -- so
+    # which SIDE of the copy a sample lands on is decided by the length of the
+    # loop body, which is not a number any check should pin.  P6 grew the body
+    # (the HUD blit) and moved it; the accepted state on either side of the copy
+    # is therefore the tick before the sample or the tick after it.
+    #
+    # The slack is in the PHASE, never in the value.  What this still rejects,
+    # on every tick: a sprite parked or hidden, one missing its +8/+16 offset
+    # (out by 8 and 16, which is not one tick of anything), and -- the reason
+    # the check exists -- a renderer carrying a position of its own, which
+    # agrees at the spawn and is a pixel further out every frame after that.
     bad = []
     for _ in range(12):
-        s = g.ship()
+        before = g.ship()
         g.run(1)
+        after = g.ship()
         oy, ox = g.oam()[:2]
-        if oy != ((s["y"] + OAM_DY) & 0xFF) or ox != ((s["x"] + OAM_DX) & 0xFF):
-            bad.append((s["y"], oy, s["x"], ox))
+        if oy not in (((before["y"] + OAM_DY) & 0xFF),
+                      ((after["y"] + OAM_DY) & 0xFF)) or \
+           ox not in (((before["x"] + OAM_DX) & 0xFF),
+                      ((after["x"] + OAM_DX) & 0xFF)):
+            bad.append((before["y"], after["y"], oy, before["x"], after["x"], ox))
     check(not bad,
           "the sprite shows the ship's own position, one vblank behind -- "
-          "state y/OAM y/state x/OAM x mismatches %r" % (bad[:4],))
+          "state y before/after, OAM y, state x before/after, OAM x "
+          "mismatches %r" % (bad[:4],))
 
     # The 8.8 position moved by EXACTLY the integral of the velocity ramp over
     # the ticks between the two samples: sum of (v + GRAV*i) for i = 1..k.
@@ -501,6 +609,11 @@ def p4_thrust(g):
                  "the ROM reached its own tick loop (frame is counting after "
                  "%d frames)" % boot):
         return
+
+    # P6: past the title.  The ship is parked while the title is up, so nothing
+    # has burned or turned before this -- which is exactly what the two checks
+    # below read the spawn for.
+    g.play()
 
     s = g.ship()
     check(s["heading"] == 0 and s["fuel"] == FUEL_START,
@@ -639,6 +752,12 @@ def p5_landing(g):
                  "%d frames)" % boot):
         return
 
+    # P6: past the title.  Both halves fly the same journey from the same
+    # spawn, and the spawn is only reached once START has cleared the title --
+    # the ship does not fall while the title is up, which is what lets this
+    # check sample it from the top.
+    g.play()
+
     # The level, out of the ROM's OWN memory, and the column the ship's own
     # spawn x stands on.  The check has to agree with the ROM about where the
     # ship is and what is under it -- reading main.c's or sim.h's constants
@@ -731,9 +850,184 @@ def p5_landing(g):
           % (s["mult"], want))
 
 
+# ------------------------------------------------------------------ P6 -----
+def p6_hud(g):
+    """The title spells itself on the screen, START clears it, and the HUD
+    numbers are the ship's OWN state rather than a copy of it.
+
+    Read through this file's copy of the font ids -- glyph() above -- because
+    the claim is about what the PPU was told, and "the number changed" is not it:
+    a HUD showing a counter of its own would change, and would still be wrong.
+    Every reading below is therefore checked against the state byte the ROM is
+    running on, the same tick.
+
+    The title half needs NO symbol out of the map: it is a claim about the
+    tilemap, so it is the half that fails on a ROM with no title screen at all
+    -- which is exactly the power gate on the previous phase's ROM.
+    """
+    print("P6 hud")
+    g.run(150)                          # let main() run and draw the title
+
+    # ---- the title -------------------------------------------------------
+    title = g.find_text("LUNA LANDEER")
+    check(bool(title),
+          "the title spells the game's name on the screen (%r)" % (title,))
+    check(bool(g.find_text("PRESS START")),
+          "and says how to start it (%r)" % (g.find_text("PRESS START"),))
+    # The mode line, and THEN the map's mode byte, so a title that advertised a
+    # mode the ROM had not selected fails here rather than reading well.
+    if not g.need("game", "pick", "ship"):
+        return
+    check(g.var("pick") == 0 and bool(g.find_text("MODE LANDER")),
+          "and offers the mode the ROM actually starts in -- LANDER, mode %d "
+          "(%r)" % (g.var("pick"), g.find_text("MODE LANDER")))
+    check(g.var("game") == ST_TITLE,
+          "the title is the state the ROM boots into (game %d)" % g.var("game"))
+
+    # SELECT is the mode toggle, and it is an EDGE -- held for four frames it
+    # flips the mode once, not four times.  What it re-sends is ONE ROW of the
+    # map: the whole title is only ever blasted at boot, so a title that still
+    # advertised the old mode after a press would be a row blitted at the wrong
+    # address, and this is the only thing that can tell.
+    #
+    # Not asserted here, either way: what START then does with DESCENT.  M2 is
+    # where that question gets an answer, and a check written now would be
+    # pinning P6's answer to it.
+    g.run(4, "T")
+    g.run(2)                            # button-free: the next press is an EDGE
+    check(g.var("pick") == 1 and bool(g.find_text("MODE DESCENT")),
+          "SELECT flips the mode and the title says so -- DESCENT, mode %d (%r)"
+          % (g.var("pick"), g.find_text("MODE DESCENT")))
+    g.run(4, "T")
+    g.run(2)
+    check(g.var("pick") == 0 and g.find_text("MODE DESCENT") == [] and
+          bool(g.find_text("MODE LANDER")),
+          "and flips it back, one row at a time -- LANDER, mode %d, %r left "
+          "behind" % (g.var("pick"), g.find_text("MODE DESCENT")))
+
+    # ---- START clears it -------------------------------------------------
+    g.play()
+    check(g.var("game") == ST_PLAY,
+          "START clears the title (game %d)" % g.var("game"))
+    check(g.find_text("LUNA LANDEER") == [] and
+          g.find_text("PRESS START") == [],
+          "and the title's text is gone from the screen (%r, %r)"
+          % (g.find_text("LUNA LANDEER"), g.find_text("PRESS START")))
+    check(bool(g.find_text("FUEL")),
+          "the HUD takes its place (%r)" % (g.find_text("FUEL"),))
+
+    # ---- the fuel counts down as fuel burns -------------------------------
+    a = g.ship()
+    f0 = g.hud_num(HUD_FUEL_ROW, HUD_FUEL_COL, HUD_FUEL_W)
+    # One tick of slack, and no more.  main.c builds the buffer, waits for the
+    # vblank and THEN blits it, so the tilemap the emulator hands back can be
+    # one tick behind the state -- the same one-vblank relationship the shadow
+    # OAM has had since P3.  The slack is in the phase, never in the value: a
+    # HUD fed by a counter of its own is out by far more than one, immediately.
+    check(f0 is not None and abs(f0 - a["fuel"]) <= 1,
+          "the HUD's FUEL reads the ship's own tank (%r against %d)"
+          % (f0, a["fuel"]))
+
+    g.run(20, "U")                      # 20 ticks of held thrust
+    b = g.ship()
+    f1 = g.hud_num(HUD_FUEL_ROW, HUD_FUEL_COL, HUD_FUEL_W)
+    check(b["fuel"] == a["fuel"] - FUEL_BURN * 20,
+          "20 ticks of held UP burn %d fuel (%d -> %d)"
+          % (FUEL_BURN * 20, a["fuel"], b["fuel"]))
+    check(f1 is not None and f0 is not None and f1 < f0,
+          "and the fuel digits on the screen change as it burns (%r -> %r)"
+          % (f0, f1))
+    check(f1 is not None and abs(f1 - b["fuel"]) <= 1,
+          "and still read the tank they are showing (%r against %d)"
+          % (f1, b["fuel"]))
+
+    # ---- ALT tracks the ship ---------------------------------------------
+    # The altitude on screen, against the gap between the ship's underside and
+    # the surface the ROM's OWN terrain table puts under it.  A HUD that showed
+    # the height above the SPAWN, or a depth fallen, is a number that moves with
+    # the ship too, and only this comparison tells the two apart.
+    col = ((b["x"] + SHIP_W // 2) >> 3) % WORLD_COLS
+    want = g.var("terrain", WORLD_COLS)[col] * 8 - (b["y"] + SHIP_H)
+    alt = g.hud_num(HUD_ALT_ROW, HUD_ALT_COL, HUD_ALT_W)
+    check(alt is not None and abs(alt - want) <= 1,
+          "and ALT is the height of the ship's underside over the ground beneath "
+          "it (%r against %d px, column %d)" % (alt, want, col))
+
+    # ---- the state machine's outcome line ---------------------------------
+    # Where the verdict lands.  A loop that stopped rebuilding the HUD once the
+    # ship stopped flying would leave the last live numbers frozen on the
+    # screen forever, and nothing else in the harness would say so: this is the
+    # one place the outcome has to reach the tilemap.
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DROP_LIMIT:
+        g.run(1)                        # no hand on the stick: a hard drop
+        ticks += 1
+    # Two ticks of slack and no more: the loop leaves the moment the state
+    # changes, and the HUD that reports it is built and blitted on the ticks
+    # that follow -- the same one-vblank lag the numbers above are allowed.
+    g.run(2)
+    s = g.ship()
+    check(s["state"] == ST_CRASH and bool(g.find_text("CRASHED")),
+          "a hard drop ends the life, and the HUD says so (state %d after %d "
+          "ticks, %r)" % (s["state"], ticks, g.find_text("CRASHED")))
+
+    # ---- a restart over a crashed life ------------------------------------
+    # Where a HUD that wrote only the tiles it needed would leave its tracks.
+    # "CRASHED" is seven tiles and the velocity row it replaces is thirteen,
+    # with a blank at column 6 that no reading ever writes -- so if that row
+    # were not cleared first, the 'D' of the old verdict would still be sitting
+    # in the middle of the new one.  Asserted as the WHOLE row against the
+    # layout, because a leftover tile is exactly the sort of thing that no
+    # string search finds and every screenshot shows.
+    g.run(8, "S")                       # START restarts the life
+    g.run(2)
+    bad = []
+    for x, c in enumerate(HUD_VEL_ROW):
+        t = g.tile(x, HUD_VERDICT_ROW)
+        if c == "d":
+            if not T_DIGIT0 <= t < T_DIGIT0 + 10:
+                bad.append((x, "a digit", t))
+        elif t != glyph(c):
+            bad.append((x, c, t))
+    check(g.ship()["state"] == ST_FLY and not bad,
+          "and START over a crashed life puts the velocity row back exactly as "
+          "the layout says -- nothing left over from the verdict (%r)" % (bad[:4],))
+
+    # ---- the other ending, which is the one that shows a SCORE ------------
+    # The descent burns whenever the ship is falling faster than VY_HOLD, the
+    # same pilot p5_landing flies.  What this reads is the digit the HUD
+    # decoded, against the multiplier the ROM's own pads table gives the column
+    # the ship landed on.
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1, "U" if g.ship()["vy"] > VY_HOLD else "")
+        ticks += 1
+    g.run(2)
+    s = g.ship()
+    shown = g.hud_num(HUD_VERDICT_ROW, HUD_VERDICT_COL, 1)
+    check(s["state"] == ST_LANDED and bool(g.find_text("LANDED X")) and
+          shown == s["mult"] == 2,
+          "and a controlled descent lands and the HUD scores it -- state %d "
+          "after %d ticks, showing %r, scored %d, %r"
+          % (s["state"], ticks, shown, s["mult"], g.find_text("LANDED X")))
+
+    # ---- the frame keeps its rate ----------------------------------------
+    # The tick loop draws now -- a 40-tile HUD blitted on every iteration
+    # against P5's nothing -- and this is where a build that no longer fits the
+    # frame shows up: the loop would miss a vblank, one iteration would stop
+    # being one tick, and every number above would agree with the physics while
+    # running at half speed.  (The 20x18 field write is NOT in this loop: it
+    # happens once, at the hand-over, and costs about three frames there.)
+    n0 = g.u16("frame")
+    g.run(FRAMES)
+    check(g.u16("frame") - n0 == FRAMES,
+          "the HUD-heavy loop is still one tick per emulated frame (%d frames "
+          "-> +%d)" % (FRAMES, g.u16("frame") - n0))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
-          ("p5_landing", p5_landing)]
+          ("p5_landing", p5_landing), ("p6_hud", p6_hud)]
 
 
 def main(rom, mapfile, only=None):

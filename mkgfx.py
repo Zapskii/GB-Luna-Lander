@@ -125,6 +125,7 @@ FONT = {
  'X': "#...#|#...#|.#.#.|..#..|.#.#.|#...#|#...#",
  'Y': "#...#|#...#|.#.#.|..#..|..#..|..#..|..#..",
  'Z': "#####|....#|...#.|..#..|.#...|#....|#####",
+ '-': ".....|.....|.....|#####|.....|.....|.....",
 }
 
 # 19 is a deliberate blank: it puts the digits on 20 and the letters on 30,
@@ -136,6 +137,14 @@ for i, ch in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
     put(30 + i, ["." + r + ".." for r in FONT[ch].split("|")] + ["........"])
 NAMES.append(("T_DIGIT0", 20))
 NAMES.append(("T_LETTER0", 30))
+
+# The minus, on 56 - the one glyph the HUD needs that A-Z/0-9 does not cover.
+# glyph() sends anything outside those two runs to T_BLANK, so a signed reading
+# ("VY -02") printed without this renders the sign as a HOLE: the number is
+# still there, one column left of where the layout put it, and it reads as a
+# spacing bug rather than as a missing tile.
+put(56, ["." + r + ".." for r in FONT['-'].split("|")] + ["........"],
+    "T_MINUS")
 
 # ------------------------------------------------------------- sprite data
 # OBJ tiles are a VRAM bank of their own, so sprite tile 0 has nothing to do
@@ -189,10 +198,14 @@ def render_ship(step):
 SPRITES = [enc(render_ship(h)) for h in range(ROT_STEPS)]
 
 # ------------------------------------------------------------- self-check
+# NTILES is the id space, and it is written out rather than taken from
+# len(TILES): an id typed one too high grows the array and shifts nothing, so
+# the check has to be told what the numbering IS to be able to disagree with it.
+NTILES = 57
 TILE_IDS = sorted(DRAWN)
-assert len(TILES) == 56, "expected 56 tile ids, got %d" % len(TILES)
-assert TILE_IDS == [0, 1, 2, 19] + list(range(20, 56)), (
-    "unaccounted tile ids: %r" % (sorted(set(range(56)) - DRAWN - set(GAP))))
+assert len(TILES) == NTILES, "expected %d tile ids, got %d" % (NTILES, len(TILES))
+assert TILE_IDS == [0, 1, 2, 19] + list(range(20, NTILES)), (
+    "unaccounted tile ids: %r" % (sorted(set(range(NTILES)) - DRAWN - set(GAP))))
 assert max(TILE_IDS) < 128, "tile id %d >= 128 reads the sprite bank" % max(TILE_IDS)
 
 # The ship headings.  Two things can be wrong here and both are invisible on a
