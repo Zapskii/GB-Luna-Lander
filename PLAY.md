@@ -77,7 +77,8 @@ begins at the point where the landing does.
 | HIGH | right of centre | ×2 |
 
 The higher-value pad is the smaller one. Both are flat, and the HUD names the
-multiplier when you land on one.
+multiplier the whole time — the pad you are over while flying, and the one you
+landed on after.
 
 ## What you're looking at
 
@@ -93,6 +94,9 @@ two rows, and everything below them is hidden:
 - **VX** — sideways speed, in pixels per frame. Positive is to the right.
 - **VY** — descent speed, in pixels per frame. Positive is downwards, and this
   is the one to watch before you land: it has to be small when you arrive.
+- **PAD X2** — the multiplier of the pad under you *right now*, while you are
+  still flying. X2 over the small pad, X1 over the big one, and **X0 when there
+  is no pad under you at all** — which is the spot you do not want to land on.
 - **LANDED X2** — you made it, and that is the pad's multiplier.
 - **CRASHED** — that life is over. START begins a new one.
 
@@ -112,7 +116,8 @@ left takes you to the right.
   reaches 0 — start slowing down while there is still height to do it in.
 - **Sliding off sideways?** Watch VX. Thrust briefly against your drift and
   level out before you touch down; do not try to fix it in the last few pixels.
-- **Crashed onto flat-looking ground?** Check it is actually a pad. Only the two
-  marked platforms count, and the terrain between them is as fatal as a cliff.
+- **Crashed onto flat-looking ground?** If PAD read X0 you were not on a pad at
+  all. Only the two marked platforms count, and the terrain between them is as
+  fatal as a cliff.
 - **Out of fuel?** You spent too much holding the engine on. Short bursts cost
   far less than a long burn, and gravity is free.
