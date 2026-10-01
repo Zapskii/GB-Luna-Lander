@@ -5,6 +5,7 @@
 #   make fps      the tick-rate check alone (frame per emulated frame)
 #   make shot     write a screenshot to /tmp/luna.png
 #   make gfx      regenerate gfx.h from mkgfx.py
+#   make border   regenerate border_data.c from art/border_sgb.png (SGB border)
 #   make level    regenerate terrain.h from tools/mklevel.py
 #   make tab      regenerate tables.h from tools/mktab.py
 #   make usage    ROM/RAM headroom
@@ -12,12 +13,13 @@
 #   make clean
 
 ROM    = luna.gb
-CFILES = main.c
-# gfx.h, terrain.h and tables.h are on the line deliberately: they are
-# GENERATED, and a make that does not know that says "nothing to do" after
-# `make gfx` / `make level` / `make tab`, leaving the OLD ROM in place for the
-# checks to grade.  That is a false PASS, and it is silent.
-SRCS   = $(CFILES) gfx.h terrain.h tables.h
+CFILES = main.c sgb_border.c border_data.c
+# gfx.h, terrain.h, tables.h, sgb_border.h and border_data.h are on the line
+# deliberately: they are GENERATED, and a make that does not know that says
+# "nothing to do" after `make gfx` / `make level` / `make tab` / `make border`,
+# leaving the OLD ROM in place for the checks to grade.  That is a false PASS,
+# and it is silent.
+SRCS   = $(CFILES) gfx.h terrain.h tables.h sgb_border.h border_data.h
 
 # The harness needs PyBoy.  Prefer this project's venv, then the one Protector
 # keeps (it has PyBoy in it), then whatever python3 is on PATH:
@@ -28,6 +30,7 @@ ifneq ($(wildcard $(GBDK_HOME)/bin/lcc),)
   RUN   :=
   LCC   := $(GBDK_HOME)/bin/lcc
   USAGE := $(GBDK_HOME)/bin/romusage
+  P2A   := $(GBDK_HOME)/bin/png2asset
 else
   # GBDK is not installed on this host, so run the toolchain out of the image.
   # lcc must be the FULL PATH: it is not on PATH inside gbdk-dev, and a bare
@@ -36,15 +39,21 @@ else
   RUN   := docker run --rm -u $(shell id -u):$(shell id -g) -v "$(CURDIR)":/work -w /work gbdk-dev
   LCC   := /opt/gbdk/bin/lcc
   USAGE := /opt/gbdk/bin/romusage
+  P2A   := /opt/gbdk/bin/png2asset
 endif
 
 # -Wm-yn"..." : the title in the ROM header, so a flash cart names it
 # -Wl-m      : the linker map.  Not optional here -- tools/probe.py reads the
 #              game's own statics out of it instead of hardcoding addresses.
 # -Wl-j      : NoICE symbols, for emulator debuggers.
-# Anything the cart type does not need yet (MBC, SRAM, the SGB header flag) is
-# deliberately absent until the phase that needs it.
-LCCFLAGS = -Wm-yn"LUNA" -Wl-m -Wl-j
+# -Wm-ys     : the Super Game Boy flag in the header.  Without it the SGB
+#              ignores the border packets and the border simply never appears --
+#              no error, and identical behaviour on a DMG, so it is invisible
+#              everywhere except on the real thing.  probe.p14_sgb_border reads
+#              the header byte it sets.
+# Anything the cart type does not need yet (MBC, SRAM) is deliberately absent
+# until the phase that needs it.
+LCCFLAGS = -Wm-ys -Wm-yn"LUNA" -Wl-m -Wl-j
 
 all: $(ROM)
 
@@ -89,6 +98,22 @@ tests/test_sim: tests/test_sim.c sim.h tables.h terrain.h
 gfx:
 	python3 mkgfx.py
 
+# The Super Game Boy border: art/border_sgb.png (256x224; the 160x144 game area
+# at x=48,y=40 is transparent) -> border_data.c/.h, committed like gfx.h so a
+# plain `make` needs no Python.  The PNG is itself generated -- tools/mkborder.py
+# draws it, the way mkgfx.py draws the tiles -- so an art change is that script
+# plus this recipe, in that order.  -pack_mode sgb is what gets the SGB layout --
+# 4bpp tiles, a 256x224 map, one attribute byte per cell -- instead of a GB
+# screen; -use_map_attributes keeps that byte, which is the per-cell palette.
+# -b 1 is what makes png2asset write `#pragma bank 1` at the top of the output,
+# so the border's ~5 KB of tiles does not eat bank 0: this ROM never switches
+# banks, so bank 1 is permanently mapped at 0x4000 and main.c can hand those
+# addresses straight to set_bkg_data.  Regenerating is safe -- the pragma comes
+# from here, not from hand-editing the generated file.
+border:
+	$(RUN) $(P2A) art/border_sgb.png -map -bpp 4 -max_palettes 4 \
+	      -pack_mode sgb -use_map_attributes -b 1 -c border_data.c
+
 level:
 	python3 tools/mklevel.py
 
@@ -105,4 +130,4 @@ clean:
 	rm -f $(ROM) *.map *.noi *.o *.lst *.sym *.ihx *.asm *.adb *.cdb \
 	      tests/test_sim $(ROM:.gb=.sav) $(ROM).ram
 
-.PHONY: all test gfx level tab usage image clean sym probe fps shot
+.PHONY: all test gfx border level tab usage image clean sym probe fps shot

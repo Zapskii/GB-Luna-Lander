@@ -2774,12 +2774,145 @@ def p13_descent(g):
           % ", ".join("%s %d/%d" % w for w in witnesses))
 
 
+# ---------------------------------------------------------------- P14 -------
+SGB_FLAG = 0x0146               # 0x03 = the cart claims SGB support
+OLD_LICENSEE = 0x014B           # 0x33 = "SGB", the toolchain's own default
+BANK1_BASE = 0x4000             # this cart is ROM-only and never switches banks
+BANK1_END = 0x8000
+
+# The sizes the border blobs are linked at, read out of border_data.h BY HAND:
+# border_data_tiles[3616] (113 tiles), border_data_palettes[16], map[1792].  They
+# are the ART's sizes, so re-drawing art/border_sgb.png moves the first one and
+# this check fails with the number in hand -- which is the intended behaviour,
+# not a nuisance.  A border that quietly stopped being shipped looks exactly
+# like one that works, so the failure is what makes the picture re-looked-at.
+BORDER_TILES_BYTES = 3616
+BORDER_PAL_BYTES = 32
+BORDER_MAP_BYTES = 1792
+TILE_BYTES = 32                 # a 4bpp tile: the border's own tile unit
+
+
+def parse_border_map(path):
+    """`_border_data_tiles` and friends out of the linker map.
+
+    border_data is its OWN translation unit, so parse_map() -- which matches
+    `Fmain$...` only -- never sees these.  The area listing carries the symbol
+    and the object it came from, which is enough: a module that was not linked
+    in has no line at all, and that absence is what the power gate reads."""
+    out = {}
+    for line in open(path):
+        m = re.match(r"\s*([0-9A-Fa-f]{8})\s+_border_data_(\w+)\s+border_data\s*$",
+                     line)
+        if m:
+            out[m.group(2)] = int(m.group(1), 16)
+    return out
+
+
+def p14_sgb_border(g):
+    """The ROM declares itself SGB, and carries the border data to be worth it.
+
+    THIS CHECK IS BYTES, NOT PIXELS.  PyBoy shows nothing of an SGB border --
+    it emulates a DMG, where sgb_check() is false and main.c's whole boot block
+    is skipped -- and a ROM built without -Wm-ys has its SGB packets silently
+    discarded, so mGBA emulates a plain DMG too.  The border can therefore look
+    finished and render nowhere at all.  THAT THE ART FRAMES THE SCREEN IS AN
+    EYEBALL: a human, in an emulator with SGB emulation on, and nothing here
+    has ever seen a pixel of it.  What is asserted is the four things that can
+    be read:
+
+      * 0x0146 == 0x03, the SGB flag -Wm-ys sets.
+      * 0x014B == 0x33, old licensee "SGB".
+      * border_data is linked in, all three blobs at full length.
+      * and all three sit in bank 1, at 0x4000 or above.
+
+    THE FLAG IS A REAL GATE HERE, not the mutation control it is in the sibling.
+    Checkers has carried -Wm-ys since its P1, so its 0x0146 was already 0x03
+    before the border landed; this one added the flag in the same phase as the
+    border, so on the previous phase's ROM it reads 0x00.  MEASURED on this host
+    by re-linking with the flag deleted: 0x0146 = 0x00 without it, 0x03 with.
+    0x014B does NOT move with it -- it reads 0x33 either way, the toolchain's
+    own default, so it is asserted as a companion and is honest about being one.
+
+    The gate above all of it is the map parse: a ROM built before this phase has
+    no border_data module, so the parse comes back empty and this exits 1 with
+    "border_data_tiles is linked in (found at nowhere)" x3.
+
+    THE ART IS THE ONE INPUT THIS CHECK CANNOT SEE.  It reads where the blobs
+    are linked, not what is in them, so a re-drawn border keeps passing the flag
+    and the addresses, and only trips the length check -- which is why the
+    lengths are constants read out of border_data.h by hand."""
+    print("P14 the ROM declares SGB and carries the border data")
+
+    rom = open(g.rom, "rb").read()
+    check(rom[SGB_FLAG] == 0x03,
+          "the SGB flag is set: ROM[0x0146] = 0x%02X" % rom[SGB_FLAG])
+    check(rom[OLD_LICENSEE] == 0x33,
+          "the old-licensee byte says SGB: ROM[0x014B] = 0x%02X"
+          % rom[OLD_LICENSEE])
+
+    b = parse_border_map(g.mapfile)
+    for name in ("tiles", "map", "palettes"):
+        check(name in b,
+              "border_data_%s is linked in (found at %s)"
+              % (name, "0x%04X" % b[name] if name in b else "nowhere"))
+    if not all(n in b for n in ("tiles", "map", "palettes")):
+        return
+
+    # Bank 1, not beside the code in bank 0.  The map ENCODES THE BANK IN THE
+    # ADDRESS -- measured, not assumed: main.c's bank-0 statics parse as plain
+    # 16-bit values (field_hide at 0x1003) while these are 0x14000, which is
+    # bank 1's base 0x4000 with the bank number in the bits above it -- so the
+    # bank is the top half and the address the bottom, and both are asserted.
+    # "in bank 1" and "at 0x4000 or above" are two different claims, and the
+    # second is the one main.c's plain pointers depend on: this cart never
+    # switches banks, so bank 1 is mapped for the whole run.
+    for name in ("palettes", "tiles", "map"):
+        bank, off = b[name] >> 16, b[name] & 0xFFFF
+        check(bank == 1 and off >= BANK1_BASE,
+              "border_data_%s is in bank %d at 0x%04X (%s 0x%04X)"
+              % (name, bank, off, ">=" if off >= BANK1_BASE else "<",
+                 BANK1_BASE))
+
+    # Full length, measured as the gap to the next blob rather than as a claim
+    # about the symbol: a stubbed or truncated array leaves a gap that is not
+    # the declared size.
+    check(b["map"] - b["tiles"] == BORDER_TILES_BYTES,
+          "the tile blob is all %d bytes on the ROM (tiles 0x%04X -> map 0x%04X)"
+          % (BORDER_TILES_BYTES, b["tiles"] & 0xFFFF, b["map"] & 0xFFFF))
+    check(b["tiles"] - b["palettes"] == BORDER_PAL_BYTES,
+          "the palette blob is all %d bytes (palettes 0x%04X -> tiles 0x%04X)"
+          % (BORDER_PAL_BYTES, b["palettes"] & 0xFFFF, b["tiles"] & 0xFFFF))
+
+    # The 128-TILE TRAP, caught here rather than on a Super Game Boy.  The tile
+    # count is DERIVED from the blob the linker actually placed, so this cannot
+    # agree with a stale constant: sgb_border.c sends one CHR_TRN block with the
+    # count shifted left, so exactly 128 tiles comes back as 256 in a uint8_t and
+    # the payload goes out EMPTY -- no error, no partial border, nothing.  Over
+    # 128 is fine (two blocks, which is what Protector's 185-tile border ships)
+    # and 256 is the SGB's two blocks and the hard end of it.
+    ntiles = BORDER_TILES_BYTES // TILE_BYTES
+    check(ntiles != 128 and ntiles <= 256,
+          "the border's %d tiles are a count that transfers (128 sends nothing, "
+          "256 is the SGB's ceiling)" % ntiles)
+
+    # Stronger than "inside the ROM": the payload ends below 0x8000, so nothing
+    # spills past the 32 KB a ROM-only cart maps, and the image is still the
+    # 32768 bytes such a cart pads to.  The address half of the encoding, not
+    # the bank half -- this claims the blob fits where it was put.
+    map_off = b["map"] & 0xFFFF
+    check(map_off + BORDER_MAP_BYTES <= BANK1_END and len(rom) == 0x8000,
+          "nothing spills past 0x%04X, and the ROM is still 32768 bytes "
+          "(map ends 0x%04X, ROM %d bytes)"
+          % (BANK1_END, map_off + BORDER_MAP_BYTES, len(rom)))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
           ("p7_sound", p7_sound), ("p9_window", p9_window),
           ("p10_camera", p10_camera), ("p11_stream", p11_stream),
-          ("p12_mode", p12_mode), ("p13_descent", p13_descent)]
+          ("p12_mode", p12_mode), ("p13_descent", p13_descent),
+          ("p14_sgb_border", p14_sgb_border)]
 
 
 def main(rom, mapfile, only=None):

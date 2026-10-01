@@ -12,10 +12,11 @@ download it and load it in an emulator, or flash it to a cartridge. Everything
 below this line is the build and the internals.
 
 **Current stage: Milestone 2 complete.** Two modes play end to end — LANDER's
-fixed 160 px world and DESCENT's 808 px one — over one ship that rotates,
+fixed 160 px world and DESCENT's 808 px one — over one ship that leans,
 thrusts, burns fuel, wraps at the world's edges, and comes to rest on a pad or
 crashes: a landing verdict with a named reason and a score, live telemetry over
-the ground in a status bar that the scrolling does not touch, and three sounds.
+the ground in a status bar that the scrolling does not touch, a burst where the
+ship died, three sounds, and a Super Game Boy border.
 `make` builds the ROM, `make test` runs the physics' unit tests on the host, and
 `make probe` drives the ROM in a headless emulator and asserts on what it did.
 
@@ -107,6 +108,45 @@ Pad multipliers come out of `terrain.h`, not out of the renderer:
 The ship spawns directly above the ×2 pad, at rest, so a drop with nobody at the
 controls is a crash and the whole of the skill is arriving slowly.
 
+## The Super Game Boy border
+
+On a Super Game Boy the game is framed by a scene: a rocket either side of the
+screen standing on the lunar surface, the two mode names along the bottom, and
+a porthole rim around the window — the screen is the view out of the ship. The
+border is a 256x224 image with the 160x144 game window punched out of it, and
+it is **drawn rather than painted**: `tools/mkborder.py` generates
+`art/border_sgb.png` the way `mkgfx.py` generates the tiles — procedurally, on
+the 8-pixel grid, lettered in the game's own font, and capped at 16 colours
+because that is what one SGB border palette holds. `make border` then turns the
+PNG into `border_data.c/.h` with png2asset, and `main.c` hands the three blobs
+(tiles, tilemap, palette) to `set_sgb_border()` once at boot, after
+`DISPLAY_ON` and behind four `vsync()`s — a PAL SNES needs that delay before it
+will take the packets, and the transfer trashes VRAM, so the game's own tiles
+and its `bg` shadow buffer are rebuilt and re-blitted immediately after.
+
+Three things about it are traps, and each is commented where it bites:
+
+- **`-Wm-ys`** puts the SGB flag in the ROM header. Without it the SGB silently
+  discards the border packets and the border never appears — no error, and
+  identical behaviour on a DMG, so it is invisible everywhere except on the
+  real thing.
+- **A border of exactly 128 tiles transfers nothing.** `sgb_border.c` sends a
+  single CHR_TRN block with the tile count shifted left for 4bpp, so 128 comes
+  back as 256 in a `uint8_t` and the payload goes out empty. Over 128 is fine
+  (it goes as two blocks) and 256 is the SGB's ceiling. `mkborder.py` asserts
+  the tile count at generation time and `probe.p14_sgb_border` re-derives it
+  from the blob the linker actually placed.
+- **The ~5 KB of border data lives in bank 1**, because a `png2asset` blob that
+  size would eat bank 0. The cart is ROM-only and never switches banks, so bank
+  1 is permanently mapped at 0x4000 and `main.c`'s plain pointers reach it.
+
+**No automated check covers the pixels.** PyBoy emulates a DMG, where
+`sgb_check()` is false and every line of the border path is skipped, and a ROM
+without `-Wm-ys` renders no border in mGBA either — so a border can look
+finished and appear nowhere. The artwork is therefore owed to an eyeball in an
+emulator with SGB emulation on; `probe.p14_sgb_border` asserts only the bytes
+that can be read.
+
 ## Build
 
     make          # luna.gb — the ROM
@@ -115,6 +155,7 @@ controls is a crash and the whole of the skill is arriving slowly.
     make fps      # the tick-rate assertion on its own (one frame per emulated frame)
     make shot     # a screenshot, to /tmp/luna.png
     make gfx      # regenerate gfx.h from mkgfx.py (committed)
+    make border   # regenerate border_data.c from art/border_sgb.png (committed)
     make level    # regenerate terrain.h from tools/mklevel.py (committed)
     make tab      # regenerate tables.h from tools/mktab.py (committed)
     make usage    # ROM/RAM headroom
@@ -144,8 +185,12 @@ to *play* the game, and `make` on its own builds the ROM with no Python at all.
 | `terrain.h` | Generated, committed — a plain `make` needs no Python |
 | `tools/mktab.py` | Generates `tables.h`: the 16 thrust unit vectors |
 | `tables.h` | Generated, committed |
-| `mkgfx.py` | Generates `gfx.h`: the font, the terrain tiles, the four star tiles and the 16 ship frames |
+| `mkgfx.py` | Generates `gfx.h`: the font, the terrain tiles, the four star tiles, the 16 ship frames and the four crash-burst frames |
 | `gfx.h` | Generated, committed. Included by `main.c` only |
+| `tools/mkborder.py` | Generates `art/border_sgb.png`, the Super Game Boy border, with self-checks |
+| `art/border_sgb.png` | Generated, committed — the 256x224 border art |
+| `sgb_border.c` / `.h` | The SGB border transfer, lifted verbatim from the sibling projects |
+| `border_data.c` / `.h` | Generated by `make border`, committed — the border's tiles, map and palette, in bank 1 |
 | `tests/test_sim.c` | Host tests for the physics and the landing rule |
 | `tools/probe.py` | Headless emulator checks: the wiring between `sim.h` and `main.c` |
 | `tools/shot.py` | Screenshot helper |
@@ -180,7 +225,9 @@ DESCENT mode is covered by the same contract as LANDER — a full descent script
 from the spawn to the pad, the camera held against the ship and clamped at both
 bounds, the map streamed across its own wrap twice, the horizontal wrap under the
 tall profile, and that same one-tick-per-frame check on the mode that had escaped
-it.
+it. P14 is bytes rather than pixels: it asserts the ROM's SGB header and that
+the border data is linked in at full length in bank 1, and says plainly that the
+artwork itself is owed to a human looking at it on an emulated Super Game Boy.
 
 `make probe` exits 0 when every check passes, 1 when a check fails, and 2 when
 the harness itself broke — so a stuck ROM is never mistaken for a passing one.
@@ -195,9 +242,6 @@ the harness itself broke — so a stuck ROM is never mistaken for a passing one.
   hardware/BOM decision rather than just a code change.
 - **Difficulty or a wind model.** Gravity and thrust are two constants; the
   weather is not a feature yet.
-- **A Super Game Boy border.** The path and its two hazards are known
-  (`-Wm-ys`, and a border of exactly 128 tiles transfers nothing) but nothing
-  is drawn.
 - **Music.** The three event sounds are hand-written register writes; there is
   no sound driver.
 

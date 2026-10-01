@@ -119,10 +119,13 @@
  * leaving the strip.
  */
 #include <gb/gb.h>
+#include <gb/sgb.h>
 #include <stdint.h>
 
+#include "border_data.h"
 #include "gfx.h"
 #include "sim.h"
+#include "sgb_border.h"
 #include "terrain.h"
 
 /* Heading selects sprite tile SPR_SHIP0 + heading, and sim.h masks it to
@@ -1177,6 +1180,43 @@ void main(void)
      * display goes on. */
     set_interrupts(VBL_IFLAG);
     DISPLAY_ON;
+
+    /* The Super Game Boy border, once, at boot -- the porthole the game's own
+     * screen is seen through.  Three things about where this sits.
+     *
+     * It has to be AFTER DISPLAY_ON: the SGB rebuilds the CHR_TRN and PCT_TRN
+     * payloads by reading a screen that is being drawn, so a border sent with
+     * the display off arrives as nothing at all.  Four frames first, because a
+     * PAL SNES needs that delay at startup or the border never appears.
+     *
+     * It takes over the tile bank getting there -- the border's 4bpp tiles land
+     * in the same VRAM the ship's tiles came from -- so the game's own load is
+     * repeated underneath it rather than trusted to survive it.  The MAP needs
+     * no rebuilding: the transfer clears the screen's tilemap but never touches
+     * `bg`, so the title is still in the buffer and one blit puts it back.
+     *
+     * And all of it is behind sgb_check(), which is false on a DMG: an ordinary
+     * Game Boy skips the block and boots exactly as it did before.
+     *
+     * NOTHING HERE IS CHECKED, AND NOTHING BELOW IS EITHER -- not by PyBoy,
+     * which emulates a DMG.  tools/probe.py's p14_sgb_border asserts the header
+     * byte -Wm-ys sets and that the blobs are linked in at full length in bank
+     * 1; whether any of it draws is an eyeball on an emulated SGB. */
+    {
+        uint8_t i;
+        for (i = 0; i != 4; i++) vsync();
+    }
+    if (sgb_check()) {
+        set_sgb_border((unsigned char *)border_data_tiles,
+                       sizeof(border_data_tiles),
+                       (unsigned char *)border_data_map,
+                       sizeof(border_data_map),
+                       (unsigned char *)border_data_palettes,
+                       sizeof(border_data_palettes));
+        set_bkg_data(0, GFX_TILE_COUNT, gfx_tiles);
+        set_sprite_data(0, GFX_SPRITE_COUNT, gfx_sprites);
+        set_bkg_tiles(0, 0, VIEW_W, VIEW_H, bg);
+    }
 
     while (1) {
         keys = joypad();

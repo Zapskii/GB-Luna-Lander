@@ -129,12 +129,19 @@ looks like hovering — the ground arrives by surprise. The stars are fixed to t
 world, so how fast they travel past you is your speed: in **LANDER** they stand
 still and the ship crosses them, in **DESCENT** they scroll up with the ground.
 
+On a **Super Game Boy** there is one more thing: the screen is framed by a small
+scene — a rocket standing either side of it on the lunar surface, and a porthole
+rim around the window, as if the view is out of the ship. Nothing about it
+changes how the game plays, and on anything else — a Game Boy, a Game Boy Color,
+an emulator that is not emulating a Super Game Boy — it is simply not there.
+
 ## If you keep crashing
 
 - **Landing hard on a pad?** Watch VY. It needs to be small by the time ALT
   reaches 0 — start slowing down while there is still height to do it in.
-- **Sliding off sideways?** Watch VX. Thrust briefly against your drift and
-  level out before you touch down; do not try to fix it in the last few pixels.
+- **Sliding off sideways?** Watch VX. Push the other way to take it off, then let
+  go and let the drift run out before you touch down; do not try to fix it in the
+  last few pixels.
 - **Crashed onto flat-looking ground?** If PAD read X0 you were not on a pad at
   all. Only the two marked platforms count, and the terrain between them is as
   fatal as a cliff.
