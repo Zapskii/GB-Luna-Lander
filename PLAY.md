@@ -20,9 +20,14 @@ a life.
 A and B are one step per press: holding one down turns the ship once, not
 continuously. There are sixteen steps in a full turn.
 
-On the title screen, SELECT picks between **LANDER** and **DESCENT**. LANDER is
-what the game starts on. DESCENT is not playable yet — starting a game gives you
-LANDER whichever one the title names.
+On the title screen, SELECT picks between **LANDER** and **DESCENT**, and START
+plays whichever one the title names. They are the same ship, the same landing
+rule and the same tank; what differs is the world.
+
+- **LANDER** — the short world. One 160-pixel screen, wrapping left to right,
+  with the ground a few pixels below the ship. It is what the game starts on.
+- **DESCENT** — the tall one. The ship opens at the top, a hundred tile rows
+  above the pad, and the view scrolls down after it.
 
 ## Flying the ship
 
@@ -58,9 +63,11 @@ well is to arrive already under control rather than to correct at the last
 instant.
 
 The ship starts every life in the air above the higher-value pad with gravity
-already pulling it down, so a life with nobody at the controls is a crash a
-moment later. That is by design: the game begins at the point where the landing
-does.
+already pulling it down, so a life with nobody at the controls is a crash. In
+LANDER that is a moment later. In DESCENT it is several seconds of falling — a
+long fall builds speed, and speed is the thing the landing rule punishes, so the
+descent has to be flown rather than merely fallen. That is by design: the game
+begins at the point where the landing does.
 
 ## The pads
 
@@ -74,8 +81,9 @@ multiplier when you land on one.
 
 ## What you're looking at
 
-The top two rows of the screen are the instrument panel, and they never cover
-the ground:
+The **bottom** two rows of the screen are the instrument panel. It sits over the
+ground rather than beside it: the world you can see is the 128 pixels above those
+two rows, and everything below them is hidden:
 
 - **FUEL** — the tank, in three digits. It starts at 600 and counts down while
   the engine is running. At zero, thrust does nothing.
@@ -91,9 +99,12 @@ the ground:
 VX and VY read 0 until the ship is moving at least a whole pixel a frame, so
 early in a life they may still say 0 while the ship is drifting down slowly.
 
-The ship itself is the little craft in the middle of the sky. The view is fixed
-and the ship moves across it; the whole 160-pixel world wraps around at the
-edges, so flying off the left takes you to the right.
+The ship itself is the little craft above the middle of the screen. In **LANDER**
+the view is fixed and the ship moves across it. In **DESCENT** the ship holds
+that line on the screen and the world scrolls up past it, so the panel is reading
+out a descent you are watching happen. Either way the view does not scroll
+sideways: the whole 160-pixel world wraps around at the edges, so flying off the
+left takes you to the right.
 
 ## If you keep crashing
 

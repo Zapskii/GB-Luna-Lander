@@ -452,39 +452,60 @@ static void text(uint8_t *buf, uint8_t col, uint8_t row, const char *s)
         *p++ = glyph(*s++);
 }
 
-/* `v` as `w` digits, right-aligned in the buffer at p, blank-padded; a negative
- * v spends none of the width on its sign, it just replaces the leftmost blank.
+/* `v` as `w` digits in the buffer at p, zero-padded; a negative v spends none
+ * of the width on its sign, it just replaces the leftmost digit.
  *
  * REPEATED SUBTRACTION, never `v / 10`.  Ten is not a power of two, so SDCC
  * turns that divide into a call to __divuint -- the same trap GRAV and THRUST
- * are shaped around -- and the values here are at most three digits, so the
- * loop is at worst sixty turns of a byte compare.  It runs at most four times a
- * tick.
+ * are shaped around.  The place values are built the same way, with shifts,
+ * because `place * 10` is that same __mulint by another name.
  *
- * `w` is the whole of the field, so it also CAPS what is shown: a one-wide
- * field prints the last digit and nothing above it, which is right for the
- * pad's multiplier (terrain.h's pads are x1 and x2) and wrong for anything a
- * value could grow past -- widen the field before letting one.  `w` is never 0,
- * or the digit loop would write one tile left of the field. */
+ * EACH COLUMN IS STRIPPED AGAINST ITS OWN PLACE VALUE INSTEAD OF COUNTING TENS
+ * OFF THE WHOLE NUMBER, and that is a P13 fix rather than a style change.  The
+ * old form is O(v/10) per call -- 84 turns of a 16-bit loop for the 776 px
+ * altitude a DESCENT life reads and 66 more for its tank, four fields a tick --
+ * and this is at most nine turns a column whatever the value.  The tick loop
+ * sits close enough to its frame budget that those turns were the whole of the
+ * DESCENT mode's overrun.  Measured on the P12 ROM: the braking descent
+ * advanced the tick counter 337 times over 484 emulated frames and a
+ * free-falling life 142 over 260, against exactly one tick per emulated frame
+ * in LANDER.  One iteration IS one tick here as everywhere else, which is the
+ * contract p1_boot and p6_hud hold LANDER to and what probe.p13_descent now
+ * holds DESCENT to; on the fixed ROM it is 334 of 334 and 125 of 126.
+ *
+ * LANDER PAYS SOME OF THIS TOO -- its tank is three digits as well -- and what
+ * the tall world added is the ALTITUDE: 72 px of air is two digits and 776 px
+ * is three, and the extra eighty-odd turns are what the frame did not have.  A
+ * budget that is only just met is the thing to watch here, so the tick-rate
+ * checks in tools/probe.py are the ones to keep green if this is ever touched
+ * again.
+ *
+ * `w` is the whole of the field, so it also CAPS what is shown: a value too
+ * wide for its field saturates into nines rather than wrapping, and every
+ * caller here keeps its value inside its field (three digits for the readings,
+ * and pad_mult() only ever answers 0, 1 or 2).  It is a backstop, not a
+ * behaviour anything depends on -- widen the field before letting a value grow
+ * past it.  `w` is never 0, or the loop would write one tile left of the
+ * field. */
 static void dec(uint8_t *p, uint8_t w, int16_t v)
 {
-    uint8_t i = w, neg = 0;
+    uint8_t i, k, neg = 0;
 
     if (v < 0) {
         neg = 1;
         v = (int16_t)(-v);
     }
-    while (i)
-        p[--i] = T_BLANK;
-    i = w;
-    for (;;) {
-        uint8_t q = 0;
+    for (i = 0; i < w; i++) {
+        uint16_t place = 1;             /* this column's place value */
+        uint8_t d = 0;
 
-        while (v >= 10) { v = (int16_t)(v - 10); q++; }
-        p[--i] = (uint8_t)(T_DIGIT0 + (uint8_t)v);
-        if (i == 0)
-            break;
-        v = q;
+        for (k = (uint8_t)(w - 1); k > i; k--)
+            place = (uint16_t)((place << 3) + (place << 1));     /* place *= 10 */
+        while (v >= (int16_t)place && d < 9) {
+            v = (int16_t)(v - (int16_t)place);
+            d++;
+        }
+        p[i] = (uint8_t)(T_DIGIT0 + d);
     }
     if (neg)
         p[0] = T_MINUS;

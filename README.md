@@ -11,21 +11,24 @@ The ROM is a [release asset](https://github.com/Zapskii/GB-Luna-Landeer/releases
 download it and load it in an emulator, or flash it to a cartridge. Everything
 below this line is the build and the internals.
 
-**Current stage: Milestone 1 complete.** One mode plays end to end: a ship that
-rotates, thrusts, burns fuel and falls through a wrap-around 160 px world, a
-landing verdict that either puts it down on a pad or crashes it, live telemetry
-over the ground, a title screen that picks the mode, and three sounds. `make`
-builds the ROM, `make test` runs the physics' unit tests on the host, and
+**Current stage: Milestone 2 complete.** Two modes play end to end — LANDER's
+fixed 160 px world and DESCENT's 808 px one — over one ship that rotates,
+thrusts, burns fuel, wraps at the world's edges, and comes to rest on a pad or
+crashes: a landing verdict with a named reason and a score, live telemetry over
+the ground in a status bar that the scrolling does not touch, and three sounds.
+`make` builds the ROM, `make test` runs the physics' unit tests on the host, and
 `make probe` drives the ROM in a headless emulator and asserts on what it did.
-Milestone 2 — the taller world and the camera that follows the ship — is not
-started.
 
 ## Modes
 
 | Mode | The world | Status |
 |---|---|---|
-| **LANDER** | One 160 px screen, wrapping left to right. The whole world fits on the screen and there is no camera. | The mode that plays, and what the ROM boots into. |
-| **DESCENT** | A world taller than the screen, with a camera following the ship down it. | Offered on the title and selectable — and **inert**: START starts LANDER whatever the title says. |
+| **LANDER** | One 160 px screen, wrapping left to right. The whole world fits on the screen, so the camera is pinned at 0 and the view is fixed. | Plays. What the ROM boots into. |
+| **DESCENT** | 808 px of world in the same 160 px of width, with a camera following the ship down it and the map streamed a row at a time around it. | Plays. SELECT it on the title and START opens it. |
+
+Both are the same game over two profiles, and P12's boot default is a single
+`pick` byte: the title's mode line, the profile the renderer and the collision
+read, and the world the camera clamps against are one answer from the first tick.
 
 The two modes are meant to differ only in their level data and their camera,
 and M1 is where that bet had to be made good on. Terrain is one array of surface
@@ -146,19 +149,22 @@ out of the linker map by name rather than by hardcoded address. That is where
 the wiring lives that the host cannot see: that the tiles go up before the
 display does, that the sprite's position is the state's position, that the HUD
 digits are the ship's own fuel and altitude, and that the tick loop still runs
-one iteration per emulated frame with the HUD blitted every tick.
+one iteration per emulated frame with the HUD blitted every tick. Since P13 the
+DESCENT mode is covered by the same contract as LANDER — a full descent scripted
+from the spawn to the pad, the camera held against the ship and clamped at both
+bounds, the map streamed across its own wrap twice, the horizontal wrap under the
+tall profile, and that same one-tick-per-frame check on the mode that had escaped
+it.
 
 `make probe` exits 0 when every check passes, 1 when a check fails, and 2 when
 the harness itself broke — so a stuck ROM is never mistaken for a passing one.
 
 ## Not implemented yet (by design)
 
-- **The DESCENT mode.** It is on the title screen and the title says which one
-  is selected, and START ignores it: there is no camera, no scrolling and no
-  taller level yet. The mode line is honest about being a choice, not about
-  being a second game.
 - **Levels, and any score that outlives a life.** One landing scores its pad's
-  multiplier and START is the only thing that follows it.
+  multiplier and START is the only thing that follows it. A descent spends about
+  a quarter of its tank, so the mode is a flight to be flown rather than a budget
+  to be rationed.
 - **A saved high score.** It needs a battery-backed cart, which is a
   hardware/BOM decision rather than just a code change.
 - **Difficulty or a wind model.** Gravity and thrust are two constants; the

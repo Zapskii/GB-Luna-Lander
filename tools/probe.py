@@ -230,6 +230,45 @@ GRAV_POLL = 400                 # frames to wait for the cartridge to start
 
 THRUST_SPAN = 8                 # ticks to hold the button in p4_thrust
 
+# --- P13: the DESCENT suite's own numbers -----------------------------------
+#
+# THE BRAKE-LATE PILOT, and why P5's pilot cannot fly this world.  LANDER's
+# air is 72 px and VY_HOLD (a quarter of SAFE_VY_MAX) walks down it in ~300
+# ticks.  The DESCENT world is 752 px of air over a 600 unit tank: a hold at
+# 0.125 px/frame needs ~4800 ticks and ~2400 units of fuel, so the slow pilot
+# runs dry two thirds of the way down and free-falls the rest.  The mode's own
+# numbers therefore ask for a DIFFERENT shape -- fall hard, brake late -- and
+# the check has to fly that shape, or it could not reach the ending it is here
+# for.
+#
+# The rule: burn while the height left is within P13_BRAKE times the distance a
+# full stop would take.  Thrust against gravity is a net 16/256 px/frame^2, so
+# stopping from vy takes vy/16 ticks and covers vy^2/32 in 8.8 units, i.e.
+# vy*vy/8192 px -- which is where the 8192 below comes from.  FOUR, and not one:
+# at exactly the stopping distance the pilot arrives at zero, and at four it
+# arrives at about 48/256 px/frame against sim.h's 128 threshold.  A margin is
+# what keeps this a check on the GAME: a pilot tuned to the threshold would be
+# asserting about itself, and one that braked too late would be asserting that
+# the ship CAN fall 752 px on 600 units, which it can only just.
+#
+# Calibrated against the ROM and reported by the check: the landing is asserted
+# to arrive under SAFE_VY_MAX and with fuel in the tank, so a retune of GRAV,
+# THRUST or FUEL_START that made the descent unaffordable fails here.
+P13_BRAKE = 4
+
+# The two bounded flights.  Named separately and kept tight -- PyBoy runs the
+# ROM a frame at a time and the DESCENT loop costs about two of them per
+# iteration (see p10_camera), so an unbounded script here is minutes of
+# wall-clock and a stuck ROM has to FAIL rather than be timed out into a
+# harness error.
+P13_LAND_LIMIT = 900            # the braking descent takes ~650 frames
+P13_WRAP_LIMIT = 400            # the sideways flight reaches the ground ~200
+
+# The tile column count the world wraps in -- sim.h's WORLD_W in px, mirrored
+# here for the same reason the tile ids are: a probe that asked the ROM where
+# its own world ended could not tell a wrap at 160 from one at 256.
+WORLD_W_PX = WORLD_COLS * 8
+
 
 def glyph(c):
     """Character -> its tile id, the probe's OWN copy of main.c's glyph().
@@ -271,6 +310,20 @@ def check(cond, msg):
     if not cond:
         fails.append(msg)
     return cond
+
+
+def rate_ok(frames, advanced):
+    """Did the ROM keep ONE TICK PER EMULATED FRAME over `frames` frames?
+
+    The one-iteration slack is the seam of the measurement and not a licence:
+    the window opens and closes on the EMULATOR's frame boundaries while the
+    counter is the ROM's own main-loop variable, so an iteration that starts
+    before the first frame or ends after the last is clipped by the edge -- and
+    a free fall's heaviest tick (the camera moving two tile rows and the ring
+    writing two) measured exactly one such over 126.  One frame of slack in a
+    measurement that runs to hundreds of frames, against a mode that was 147
+    short over 484 before this phase fixed it."""
+    return frames - 1 <= advanced <= frames
 
 
 class Game:
@@ -1704,7 +1757,16 @@ def p11_stream(g):
         ticks += 1
         cam, scy = g.u16("cam"), g.p.memory[SCY]
         samples.append((cam, scy))
-        if ticks % 4 or not settled(cam, scy):
+        # EVERY SECOND TICK, and it was every fourth until P13 fixed the
+        # DESCENT loop's frame overrun.  This flight is measured in EMULATED
+        # FRAMES and the ROM was running at about half a tick per frame when
+        # the stride was chosen, so the same descent reached the ground in 292
+        # frames then and 148 now -- a stride of four would compare half the
+        # bands it used to.  The threshold below is unmoved and the bands
+        # compared roughly double: this is a denser sample of the same claim,
+        # not a smaller one.  probe.p13_descent is what asserts the loop runs
+        # one tick per frame, and where that came from.
+        if ticks % 2 or not settled(cam, scy):
             continue
         checked += 1
         b = band_bad(cam)
@@ -2020,12 +2082,411 @@ def p12_mode(g):
         g2.p.stop()
 
 
+# ----------------------------------------------------------------- P13 -----
+def p13_descent(g):
+    """The DESCENT mode flown from the spawn to the PAD -- and every claim its
+    two stateful halves make, exercised on a descent that ends in a landing
+    instead of a crash.
+
+    P10 checked the camera and P11 the ring, and both flew the SAME life: the
+    ship falls the whole world with nobody at the controls, which is the
+    cheapest scripted descent there is and all either phase needed -- the
+    camera reaches its bottom clamp and the ring crosses its map.  What that
+    leaves uncovered is everything about the mode's OTHER ending and the two
+    things that only happen on a fall long enough to get there: the ship coming
+    to rest on the descent's pad and being SCORED for it, the camera's bottom
+    clamp held for a whole approach rather than a frame at the end, and the
+    ring's modulus crossed a second time -- where a base that had stopped
+    following the camera is wrong in a way its first crossing cannot show.
+
+    THE PILOT IS PART OF THE CHECK, and it is not P5's.  VY_HOLD is a quarter
+    of SAFE_VY_MAX and walks LANDER's 72 px of air down in ~300 ticks; the
+    DESCENT world is 752 px of air over a 600 unit tank, so the same pilot
+    needs ~2400 units of fuel, runs dry two thirds of the way down and falls
+    the rest.  The mode's own numbers ask for the other shape -- fall hard,
+    brake late, arrive under the threshold -- and a suite that only ever
+    scripted the crash could not tell a descent that LANDS from one that
+    cannot.  P13_BRAKE has the tuning and the reasoning; the landing below is
+    asserted to arrive with fuel still in the tank, so a retune that made the
+    descent unaffordable fails here rather than in a comment.
+
+    THE HORIZONTAL WRAP IS CHECKED UNDER THIS PROFILE, in a second life: the
+    ship is turned nose-first into the world and flown until it wraps.  The
+    family's trap is a two-compare wrap that became an `& WORLD_MASK` -- 160 is
+    not 256, so the mask puts the ship ninety-six pixels past the right edge,
+    off the screen, where the seam reads as the ship flying away.  Every sample
+    is asserted to be inside the world, the seam is asserted to have been
+    crossed more than once, and the ground under the ship ON the seam is read
+    back off the ROM's own HUD, so the column wrap in ship_col() is graded too
+    and not just the x one.
+
+    AND ONE META-ASSERTION AT THE END, which is the only one of these that is
+    not about the game: every claim above is worth nothing if the situation it
+    describes never happened -- a clamp asserted against no clamped samples, a
+    band compared with no bands read, a seam nothing crossed.  Each claim
+    reports how many times this run produced its own precondition, and the last
+    check is that all of them cleared their minimum.  A check that quietly
+    stopped being reached shows up there as a failure instead of a green line.
+    """
+    print("P13 descent")
+    # A symbol this phase reads being ABSENT is an assertion failure, not a
+    # harness error: that is the power gate on an older ROM and it answers 1.
+    if not g.need("game", "pick", "terrain", "terrain_lander", "terrain_descent",
+                  "world_h", "ship", "cam", "ring_top"):
+        return
+
+    lander = g.profile("terrain_lander")
+    descent = g.profile("terrain_descent")
+    descent_h = (max(descent) + 1) * 8
+    cam_max = descent_h - PLAY_H_PX
+    lander_h = (max(lander) + 1) * 8
+
+    def col_of(x):
+        """sim.h's ship_col(), mirrored -- the tile under the ship's CENTRE and
+        its SECOND wrap: x = 159 puts the centre on pixel 163, world tile 20,
+        which is tile 0 on the torus.  Written out rather than derived for the
+        same reason the tile ids are: a probe that asked the ROM which column
+        the ship was on could not tell a wrapped column from a clamped one."""
+        c = (x + SHIP_W // 2) >> 3
+        return c - WORLD_COLS if c >= WORLD_COLS else c
+
+    def ground_under(prof, x):
+        return prof[col_of(x)] * 8
+
+    def want_cam(y):
+        """sim.h's camera_for(), mirrored: the clamp of ship_y - CAM_ANCHOR to
+        the WORLD's bound -- not the map's 256 px, and not the panel's 144."""
+        return min(max(y - CAM_ANCHOR, 0), cam_max)
+
+    def band_bad(cam):
+        """Every tile of the visible window against the world row the camera
+        puts at that screen row, or [] if they all agree.
+
+        The map is a RING: a world row's slot is its own index modulo the map's
+        height, and the whole point of the second crossing below is that a
+        modulus which is merely wrong is right for the first 256 px of the
+        descent.  Every visible row and not just some of them, because the
+        status bar is the WINDOW layer's as of P12 and the BG map is terrain
+        from row 0 down."""
+        top = cam >> 3
+        out = []
+        for r in range(VIEW_H):
+            wr = top + r
+            mr = wr & (MAP_TILES - 1)
+            for c in range(WORLD_COLS):
+                want = (T_BLANK if wr < descent[c] else
+                        T_TERRAIN_TOP if wr == descent[c] else T_TERRAIN)
+                got = g.tile(c, mr)
+                if got != want:
+                    out.append((c, r, wr, mr, want, got))
+        return out
+
+    # ---- into the DESCENT half --------------------------------------------
+    g.run(150)
+    g.run(4, "T")               # SELECT: the tall world (an EDGE)
+    g.run(2)                    # button-free: the next press is an EDGE too
+    g.run(8, "S")               # START opens it
+    g.run(2)
+    check(g.var("pick") == 1 and g.u16("terrain") == g.addr["terrain_descent"]
+          and g.u16("world_h") == descent_h,
+          "the DESCENT half is the world the check is about -- pick %d, the one "
+          "`terrain` symbol -> 0x%04X, world_h %d px against LANDER's %d"
+          % (g.var("pick"), g.u16("terrain"), g.u16("world_h"), lander_h))
+
+    # ---- the braking descent, sampled every tick --------------------------
+    # The pilot reads the state, decides, and holds the button for ONE frame --
+    # the loop below is closed-loop, so a press that lands between the ROM's
+    # own joypad reads costs a tick of braking rather than the descent, and the
+    # margin in P13_BRAKE is what absorbs it.
+    samples = []                # (y, cam, scy)
+    bands = 0                   # sampled bands that were compared
+    deep_bands = 0              # ...and of those, the ones past the first wrap
+    band_fails = []
+    ticks = 0
+    f0 = g.u16("frame")
+    while g.ship()["state"] == ST_FLY and ticks < P13_LAND_LIMIT:
+        s = g.ship()
+        alt = ground_under(descent, s["x"]) - (s["y"] + SHIP_H)
+        burn = s["vy"] > 0 and alt * 8192 <= s["vy"] * s["vy"] * P13_BRAKE
+        g.run(1, "U" if burn else "")
+        ticks += 1
+        cam, scy = g.u16("cam"), g.p.memory[SCY]
+        samples.append((g.ship()["y"], cam, scy))
+        # The band is read only where the tick's two halves AGREE -- the same
+        # gate p11_stream uses, and for the same reason: a tick computes `cam`
+        # in its body and writes SCY and the ring from it in the vblank after,
+        # so a sample can land between them and be a genuine one-row mismatch
+        # that is an ordering artefact rather than a stale row.  `ring_top` is
+        # written BY the row write and by nothing else, so it is exactly the
+        # test.
+        if ticks % 4 == 0 and g.var("ring_top") == cam >> 3:
+            bands += 1
+            if cam >> 3 >= MAP_TILES:
+                deep_bands += 1
+            b = band_bad(cam)
+            if b:
+                band_fails.append((cam, b[:2]))
+    landed = g.ship()
+    check(len(samples) > 8 and landed["state"] != ST_FLY,
+          "the brake-late pilot flew the world down -- %d frames to the ground "
+          "(%d samples, state %d, vy %d, fuel %d)"
+          % (ticks, len(samples), landed["state"], landed["vy"], landed["fuel"]))
+
+    # ---- and the DESCENT loop keeps the clock -----------------------------
+    # THE SAME CONTRACT p1_boot AND p6_hud HOLD LANDER TO, and the one thing
+    # this mode did not have: one iteration is one tick, so a descent is 16.7 ms
+    # a frame like everything else.  P10 and P11 both worked around the
+    # overrun rather than fixing it -- they read the DESCENT world at whatever
+    # rate it ran and allowed the ship to fall a tick or two per emulated frame
+    # -- so nothing until now has said out loud whether it holds.
+    #
+    # It did not.  This is the assertion that fails on the P12 ROM: the status
+    # bar's altitude is a THREE-digit number down a 101-row world where LANDER's
+    # is two, and the HUD's decimal conversion stripped its digits by counting
+    # tens off the whole value -- ~84 turns of a 16-bit loop, four fields a tick
+    # -- which pushed the loop past the frame budget and made DESCENT run at
+    # 337 ticks per 484 emulated frames.  A game that quietly runs slow is
+    # exactly what p1_boot's tick-rate check exists for, and this is that same
+    # check on the mode that had escaped it.
+    #
+    # ONE ITERATION OF SLACK, and no more, for the reason p10_camera gives for
+    # its own: it is the seam, never the value.  The window opens and closes on
+    # the EMULATOR's frame boundaries while the counter is the ROM's own, so an
+    # iteration that starts before the first frame or ends after the last is
+    # clipped by the edge of the measurement; and a free fall's heaviest tick --
+    # the camera moving two rows and the ring writing two -- measured exactly
+    # one such over 126 (see the second witness below).  What this rejects is
+    # the P12 ROM, 147 ticks short over the same flight.
+    check(rate_ok(ticks, g.u16("frame") - f0),
+          "and the DESCENT loop runs ONE TICK PER EMULATED FRAME -- the contract "
+          "p1_boot and p6_hud hold LANDER to, now over a world whose status bar "
+          "carries three-digit readings and a camera that writes a map row every "
+          "tick (%d emulated frames advanced the tick counter by %d)"
+          % (ticks, g.u16("frame") - f0))
+
+    # ---- the landing ------------------------------------------------------
+    # On the DESCENT's own ground, and read out of the DESCENT profile: the
+    # ship spawns over the x2 pad and never touches the stick's rotation, so
+    # the column it lands in is the column it started on.  A ROM that landed it
+    # on LANDER's surface would be resting 704 px higher and this compares the
+    # underside against the profile's own row, not against the other world's.
+    col = col_of(landed["x"])
+    ground = ground_under(descent, landed["x"])
+    check(landed["state"] == ST_LANDED and landed["verdict"] == LAND_SAFE,
+          "and it lands rather than crashes -- state %d, verdict %d, column %d "
+          "of %d" % (landed["state"], landed["verdict"], col, WORLD_COLS))
+    check(landed["y"] + SHIP_H == ground and ground == descent[col] * 8
+          and ground != lander[col] * 8 and landed["vy"] == 0,
+          "resting ON the DESCENT world's own surface -- underside %d, and the "
+          "profile puts column %d's ground at %d px (LANDER's would be %d), "
+          "with nothing left over (vy %d)"
+          % (landed["y"] + SHIP_H, col, ground, lander[col] * 8, landed["vy"]))
+    # The multiplier against the ROM's OWN pad table AND against the literal 2,
+    # for p5_landing's reason: a score hardcoded to whatever the table said
+    # would pass the first comparison alone.  The pads' spans are shared by the
+    # two worlds (terrain.h) and only their DEPTH differs, so this is the one
+    # number a descent landing and a LANDER landing have in common.
+    raw = g.var("pads", PAD_COUNT * 3)
+    under = [raw[3 * i + 2] for i in range(PAD_COUNT)
+             if raw[3 * i] <= col <= raw[3 * i + 1]]
+    check(under and landed["mult"] == under[0] == 2,
+          "and the descent's landing is SCORED -- x2 for the pad under the "
+          "spawn (scored %d, the ROM's own pads table says %r)"
+          % (landed["mult"], under))
+    # THE FUEL, which is the mode's whole arithmetic: 752 px of air on a 600
+    # unit tank is only affordable because a late brake spends about a quarter
+    # of it (168 units, measured).  A tank or an air gap retuned past the edge of
+    # that fails here.
+    check(landed["fuel"] > 0,
+          "and it was affordable -- %d of %d fuel left, so the descent is a "
+          "descent and not a fall"
+          % (landed["fuel"], FUEL_START))
+
+    # ---- the camera, tick by tick ----------------------------------------
+    # Every sample against the rule, and the rule written out here rather than
+    # imported from sim.h: a probe that asked the ROM what its own answer
+    # should be could not tell a camera whose anchor had drifted.
+    #
+    # ONE ITERATION OF SLACK, and no more -- p10_camera's allowance, for its
+    # reason: main.c computes cam from ship.y inside the tick and these are two
+    # separate reads of the emulator's memory.  The slack is in the PHASE (the
+    # accepted answer is the rule at the altitude before or at the altitude
+    # now) and never in the value.
+    bad = []
+    for k, (y1, c1, s1) in enumerate(samples):
+        y0 = samples[k - 1][0] if k else y1
+        c0 = samples[k - 1][1] if k else c1
+        if c1 not in (want_cam(y0), want_cam(y1)) or s1 not in (c0 & 0xFF, c1 & 0xFF):
+            bad.append((y0, y1, c1, s1))
+    check(not bad,
+          "cam is the clamp of ship_y - %d to the WORLD's bound %d -- not the "
+          "map's 256 px and not the panel's %d -- at every sampled tick, and "
+          "SCY is its low byte (y_prev:y:cam:scy %r)"
+          % (CAM_ANCHOR, cam_max, VIEW_H_PX, bad[:4]))
+
+    pinned_top = [c for (y, c, _s) in samples if y <= CAM_ANCHOR]
+    check(len(pinned_top) >= 4 and set(pinned_top) == {0},
+          "before the descent starts the camera is pinned at 0 -- %d samples at "
+          "or above y %d, cam values %r"
+          % (len(pinned_top), CAM_ANCHOR, sorted(set(pinned_top))))
+
+    pinned_bot = [c for (y, c, _s) in samples if y - CAM_ANCHOR >= cam_max]
+    check(len(pinned_bot) >= 4 and set(pinned_bot) == {cam_max},
+          "and the approach is spent ON the bottom clamp at %d, so the view "
+          "stops with the world's last row visible and not under the status "
+          "bar -- %d samples at or below y %d, cam values %r"
+          % (cam_max, len(pinned_bot), cam_max + CAM_ANCHOR,
+             sorted(set(pinned_bot))))
+
+    free_y = [y for (y, c, _s) in samples if 0 < c < cam_max]
+    free_c = [c for (_y, c, _s) in samples if 0 < c < cam_max]
+    check(len(free_c) >= 8 and all(b >= a for a, b in zip(free_c, free_c[1:]))
+          and free_c[-1] - free_c[0] >= (max(free_y) - min(free_y)) - 4,
+          "and between the two clamps it tracks the ship rather than holding or "
+          "stepping -- %d unclamped samples, none moving back up, and the "
+          "camera advanced %d px across the %d px the ship fell"
+          % (len(free_c), free_c[-1] - free_c[0], max(free_y) - min(free_y)))
+
+    # ---- the ring, across the map MORE THAN ONCE --------------------------
+    # The map is 32 rows and this descent's camera rides the whole way from 0 to
+    # the bottom clamp -- 85 rows of it -- so its own row crosses the ring's
+    # whole height twice.  THAT is what makes the modulus a
+    # claim: a band written with the wrong one -- or at a base that stops
+    # following the camera -- is right for the first 256 px and then repeats a
+    # stretch of the world it has already gone past, and every row of it is
+    # still a tile from the right profile, so nothing but this number says so.
+    tops = [c >> 3 for (_y, c, _s) in samples]
+    check(min(tops) == 0 and max(tops) - min(tops) >= 2 * MAP_TILES,
+          "and the flight crossed the map's whole height TWICE -- the camera's "
+          "row ran %d -> %d, %d rows against a %d-row map, so the wrap is past "
+          "its second crossing and not merely over the first"
+          % (min(tops), max(tops), max(tops) - min(tops), MAP_TILES))
+    check(bands >= 20 and not band_fails,
+          "and every visible row on the way down is the profile row the camera "
+          "says belongs there, on the far side of the ring's own wrap as well "
+          "-- %d sampled bands, col:row:world-row:map-row:want:found %r"
+          % (bands, band_fails[:3]))
+
+    # ---- the horizontal wrap, under THIS profile --------------------------
+    # A second life, because the first one ended on the pad.  The ship is
+    # turned nose-first into the world -- heading 4 is +x, no dy at all -- and
+    # then flown until the ground stops it.  Every tick of it is on the DESCENT
+    # profile (752 px of air, and a ship at heading 4 thrusts sideways only, so
+    # it still falls the whole way).
+    g.run(8, "S")
+    g.run(2)
+    for _ in range(4):          # B four times: one step per press, not per frame
+        g.run(4, "B")
+        g.run(2)
+    check(g.ship()["heading"] == 4,
+          "the second life is turned nose-first into the world -- heading 4 is "
+          "+x and no dy at all (heading %d)" % g.ship()["heading"])
+
+    xs = []
+    crossings = 0               # ticks where x came back round the seam
+    seam_reads = 0              # ticks the ship's centre was on the seam
+    alt_bad = []
+    prev_x = None
+    ticks = 0
+    f1 = g.u16("frame")
+    while g.ship()["state"] == ST_FLY and ticks < P13_WRAP_LIMIT:
+        before = g.ship()
+        g.run(1, "U")           # held: heading 4, so this is sideways only
+        ticks += 1
+        s = g.ship()
+        xs.append(s["x"])
+        # The only way x moves backwards is the seam: vx is positive for the
+        # whole flight, so a step of a pixel or two forward and a jump of
+        # ~160 back is a crossing and nothing else can look like one.
+        if prev_x is not None and s["x"] + 16 < prev_x:
+            crossings += 1
+        prev_x = s["x"]
+        # ON THE SEAM, and the ground read off the ROM's OWN HUD: what is under
+        # the ship there is the column its CENTRE wrapped onto, which is the
+        # second wrap -- the one inside ship_col() -- and the ALT the status bar
+        # shows is the only thing here that goes through it.
+        if s["x"] >= WORLD_W_PX - SHIP_W or s["x"] < SHIP_W:
+            seam_reads += 1
+            got = g.hud_num(HUD_ALT_ROW, HUD_ALT_COL, HUD_ALT_W)
+            want = [ground_under(descent, s["x"]) - (s["y"] + SHIP_H),
+                    ground_under(descent, before["x"]) - (before["y"] + SHIP_H)]
+            # ONE ITERATION OF SLACK, and here it is a WIDTH rather than two
+            # candidate values, because the two things the altitude is made of
+            # move at very different speeds.  The GROUND under the ship is what
+            # this is about -- it steps by a tile, and the value read back is
+            # compared against the profile's own row through the wrapped column
+            # -- but the same number also carries the ship's y, which at the
+            # end of a free fall moves better than eight pixels a tick, and the
+            # HUD is built inside the tick and read outside it.  So the
+            # tolerance is exactly one tick of that motion, no more: what it
+            # still rejects is the other profile (~700 px out, LANDER's ground
+            # being 72 px down where this one is 776) and a column read past the
+            # end of terrain[] rather than wrapped back onto column 0.
+            tol = 1 + abs(s["y"] - before["y"])
+            if got is None or min(abs(got - w) for w in want) > tol:
+                alt_bad.append((s["x"], col_of(s["x"]), got, want))
+
+    # ...and the same clock, on the flight with nothing under the ship's fall:
+    # the braking descent spends most of its frames slowing down, and a free
+    # fall drives the camera down two rows a tick at the end of it -- so this
+    # is the second flight and the second witness, and it is the one that puts
+    # the ring's row write under the most pressure.
+    check(rate_ok(ticks, g.u16("frame") - f1),
+          "and a free-falling DESCENT life keeps it too -- the other end of the "
+          "camera's travel, where it moves two rows a tick and the ring writes a "
+          "row with it (%d emulated frames advanced the tick counter by %d)"
+          % (ticks, g.u16("frame") - f1))
+    check(len(xs) > 8 and not any(x >= WORLD_W_PX for x in xs),
+          "and every pixel of the sideways flight is inside the %d px world -- "
+          "a wrap that masked at 256 would put the ship up to 96 px past the "
+          "right edge, off the screen and past the last column (x ran %d..%d "
+          "over %d frames)"
+          % (WORLD_W_PX, min(xs), max(xs), len(xs)))
+    check(max(xs) >= WORLD_W_PX - SHIP_W and min(xs) < SHIP_W,
+          "and it really went round -- the ship reached the last column (x %d) "
+          "and came back on at the first (x %d)" % (max(xs), min(xs)))
+    check(crossings >= 2,
+          "MORE THAN ONCE, so the seam is the world's edge and not a place the "
+          "ship happened to stop -- %d crossings of the %d px seam over %d "
+          "frames" % (crossings, WORLD_W_PX, len(xs)))
+    check(seam_reads >= 4 and not alt_bad,
+          "and the ground under it ON the seam is the DESCENT profile's, read "
+          "off the ROM's own ALT -- the column the centre WRAPPED onto, not the "
+          "one past the end of terrain[] (%d seam ticks, x:col:alt:want %r)"
+          % (seam_reads, alt_bad[:4]))
+
+    # ---- the meta-assertion ----------------------------------------------
+    # Every claim above is only as good as its own situation having actually
+    # happened in this run, so each one reports a WITNESS -- how many times the
+    # scripted flight produced what it describes -- and this is the one check
+    # that they all cleared.  It is not decoration: a clamp assertion with
+    # nothing clamped, a band comparison with no bands read and a seam nothing
+    # crossed all PASS trivially, and each would do it silently.
+    witnesses = [
+        ("the camera pinned at the top of its travel", len(pinned_top), 4),
+        ("the camera pinned on the bottom clamp", len(pinned_bot), 4),
+        ("the camera free between the two", len(free_c), 8),
+        ("bands compared", bands, 20),
+        ("bands past the ring's first wrap", deep_bands, 8),
+        ("rows the camera's own row crossed", max(tops) - min(tops), 2 * MAP_TILES),
+        ("crossings of the horizontal seam", crossings, 2),
+        ("ALT read on the seam", seam_reads, 4),
+        ("the descent landed", 1 if landed["state"] == ST_LANDED else 0, 1),
+    ]
+    short = [w for w in witnesses if w[1] < w[2]]
+    check(not short,
+          "every claim above was individually reachable in this run -- each "
+          "one reports how often the flight produced its own precondition, "
+          "against the least that makes it mean anything (%s)"
+          % ", ".join("%s %d/%d" % w for w in witnesses))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
           ("p7_sound", p7_sound), ("p9_window", p9_window),
           ("p10_camera", p10_camera), ("p11_stream", p11_stream),
-          ("p12_mode", p12_mode)]
+          ("p12_mode", p12_mode), ("p13_descent", p13_descent)]
 
 
 def main(rom, mapfile, only=None):
