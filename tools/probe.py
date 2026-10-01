@@ -153,6 +153,24 @@ FUEL_BURN = 1
 ROT_STEPS = 16
 SPR_SHIP0 = 0
 
+# The APU's registers, mirrored from gb/gb.h for the same reason the tile ids
+# are: this file writes down WHAT it expects, so a ROM that powers the APU on
+# and routes it can be told from one that does -- or from one that only looks
+# like it does.
+NR12 = 0xFF12                   # CH1 volume / envelope: what thrust writes.
+                                # NOT 0xFF17, which is NR22 -- CH2's, and CH2
+                                # is the LANDING: a check that read that one
+                                # would be watching the wrong channel and
+                                # would read 0x00 on every ROM that never
+                                # landed, which is most of this one.
+NR22 = 0xFF17                   # CH2's, which is the LANDING
+NR42 = 0xFF21                   # CH4's, which is the CRASH
+NR50, NR51, NR52 = 0xFF24, 0xFF25, 0xFF26
+APU_ON = 0x80                   # NR52 bit 7.  CLEAR at main() entry: crt0
+                                # powers the APU down, and while it is clear
+                                # every sound-register write reads back zero.
+NR50_BOOT, NR51_BOOT = 0x77, 0xFF   # full volume, all four channels both sides
+
 GRAV_SPAN = 8                   # ticks between the two position samples
 GRAV_POLL = 400                 # frames to wait for the cartridge to start
 
@@ -203,7 +221,16 @@ def check(cond, msg):
 
 class Game:
     def __init__(self, rom, mapfile):
-        self.p = PyBoy(rom, window="null", sound_emulated=False)
+        # sound_emulated=True is REQUIRED by p7_sound, and costs nothing else
+        # (every frame count below is unmoved by it).  With sound off, PyBoy
+        # does not implement the APU at all -- pyboy/core/sound.py's get()
+        # returns 0 for every offset before it looks at anything --
+        # so NR52/NR50/NR51/NR12 read 0x00 forever and writes to them are
+        # swallowed.  A register check written against that build fails on
+        # EVERY ROM, its own included, which is a check that reads as "has
+        # power" and is really noise; this is the same switch the sibling
+        # project's sfx check needed.
+        self.p = PyBoy(rom, window="null", sound_emulated=True)
         self.addr = parse_map(mapfile)
         self.rom = rom
         self.mapfile = mapfile
@@ -1025,9 +1052,135 @@ def p6_hud(g):
           "-> +%d)" % (FRAMES, g.u16("frame") - n0))
 
 
+# ------------------------------------------------------------------ P7 -----
+def p7_sound(g):
+    """The APU is powered on, and the thrust is a level the ROM turns up and
+    back down again.
+
+    NOTHING HERE CLAIMS ANY SOUND IS AUDIBLE, AND NONE OF IT COULD: this runs
+    with window="null" and never opens an audio device, and no assertion below
+    listens to a sample.  sound_emulated=True is on so that PyBoy IMPLEMENTS
+    the APU registers at all (with it off they read 0x00 forever -- see the
+    Game constructor); it buys readable registers, not ears.  What is asserted
+    is only that the ROM WROTE the registers the APU reads, and wrote them in
+    the shape the phase asks for.  Whether the three sounds actually come out
+    of a speaker is owed to ears -- real hardware, or an emulator with audio
+    switched on -- and is UNVERIFIED by this check and by every other one in
+    this file.
+
+    That is still worth asserting, because the failure it covers is silent in
+    both senses.  GBDK's crt0 powers the APU DOWN, so at main() entry NR52 bit
+    7 is CLEAR and every sound-register write reads back zero and vanishes --
+    a ROM with three perfectly-shaped envelope writes and no boot line plays
+    nothing, and no screenshot, no tilemap and no state byte says so.  Reading
+    the register back is the only thing that can tell those two ROMs apart.
+
+    The register is the RIGHT thing to read even though the sound is not
+    emulated: 0xFF26/0xFF24/0xFF25/0xFF17 are ordinary memory to PyBoy, so what
+    comes back is exactly what the ROM wrote.
+    """
+    print("P7 sound")
+    g.run(150)                          # let main() run its boot
+
+    # ---- the boot --------------------------------------------------------
+    # Bit 7 SET means the ROM wrote NR52 = 0x80.  On the previous phase's ROM
+    # this reads 0x70 -- bit 7 clear, all four channels off -- and that is the
+    # whole of the power gate.
+    apu = g.p.memory[NR52]
+    check(apu & APU_ON == APU_ON,
+          "the APU is powered on by the boot (NR52 0x%02X, bit 7 %s)"
+          % (apu, "set" if apu & APU_ON else "CLEAR"))
+
+    # ...and the routing went with it.  Powering the APU on RESETS NR50/NR51,
+    # so a boot that set NR52 alone would be a powered APU with every channel
+    # routed nowhere -- the same silence by another route, and this is the only
+    # assertion that can tell the two apart.
+    nr50, nr51 = g.p.memory[NR50], g.p.memory[NR51]
+    check(nr50 == NR50_BOOT and nr51 == NR51_BOOT,
+          "and the routing is set alongside it, which powering on resets -- "
+          "full volume, all four channels to both outputs (NR50 0x%02X, "
+          "NR51 0x%02X)" % (nr50, nr51))
+
+    # ---- the thrust, which is a LEVEL ------------------------------------
+    # Past the title, onto the field: the play branch is the only place the
+    # sound functions are called from, so nothing has touched CH1 before this.
+    g.play()
+
+    idle = g.p.memory[NR12]
+    check(idle >> 4 == 0,
+          "CH1 is silent before the burn -- volume 0, nothing latched from "
+          "the title or the boot (NR12 0x%02X, volume %d)" % (idle, idle >> 4))
+
+    # One held frame.  run() presses the button, ticks once and releases it, so
+    # the tick in between is a tick with UP down -- and the volume nibble of
+    # NR12 is the engine: non-zero exactly when the ROM decided this tick
+    # burned.
+    g.run(1, "U")
+    loud = g.p.memory[NR12]
+    check(loud >> 4 != 0,
+          "and a thrust tick turns it up (NR12 0x%02X, volume %d)"
+          % (loud, loud >> 4))
+
+    # ...and the channel came ON, which is the only READABLE trace the trigger
+    # bit leaves.  The trigger is bit 7 of the high frequency register (NR14
+    # here) and it is WRITE-ONLY -- it cannot be read back -- but a trigger is
+    # what sets the channel's enable bit in NR52, and writing the envelope
+    # alone never does.  So this is the assertion that fails if the 0x80 ever
+    # comes off NR14, which is the phase's named trap: without it a repeat hit
+    # only rewrites a running channel and the second sound is inaudible.
+    check(g.p.memory[NR52] & 0x01 == 0x01,
+          "and it came ON, so the high frequency register's trigger bit was "
+          "really written -- NR14's bit 7 is write-only, and a trigger is what "
+          "sets CH1's enable bit in NR52 (NR52 0x%02X)"
+          % g.p.memory[NR52])
+
+    # Released.  The thrust is re-armed every tick it lasts, so this is the
+    # tick the re-arming stops: the ROM writes the channel down to volume 0.
+    # Asserted as the VOLUME nibble and not as the whole byte on purpose: the
+    # value that is correct here is 0x08, which keeps the DAC bit set and so
+    # silences the channel rather than switching it off.  A byte-equality
+    # check would have demanded 0x00, which is the switch-off this design
+    # avoids.
+    g.run(2)
+    back = g.p.memory[NR12]
+    check(back >> 4 == 0,
+          "releasing the button returns it to zero -- the thrust is a level, "
+          "not a latch (NR12 0x%02X, volume %d)" % (back, back >> 4))
+
+    # ---- the two events, which write a channel ONCE ----------------------
+    # The other two thirds of the deliverable, and they need no stop: each is
+    # one written set of registers with a decreasing envelope, nothing writes
+    # the channel again, and so the register keeps what the event left in it.
+    # Read off CH4 and CH2 respectively -- the channels main.c assigns them,
+    # so a crash wired to CH2 fails here.
+    ticks = 0
+    while g.ship()["state"] != ST_CRASH and ticks < DROP_LIMIT:
+        g.run(1)                        # no hand on the stick: a hard drop
+        ticks += 1
+    crash = g.p.memory[NR42]
+    check(g.ship()["state"] == ST_CRASH and crash >> 4 != 0,
+          "and a hard drop writes CH4, on the tick the crash is classified "
+          "(state %d after %d ticks, NR42 0x%02X, volume %d)"
+          % (g.ship()["state"], ticks, crash, crash >> 4))
+
+    # The same scripted descent p5_landing flies, for the same reason: the
+    # spawn is over a pad, so a hand on the stick is the whole difference.
+    g.run(8, "S")                       # START restarts the life
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1, "U" if g.ship()["vy"] > VY_HOLD else "")
+        ticks += 1
+    land = g.p.memory[NR22]
+    check(g.ship()["state"] == ST_LANDED and land >> 4 != 0,
+          "and a controlled descent writes CH2, on the tick it lands (state "
+          "%d after %d ticks, NR22 0x%02X, volume %d)"
+          % (g.ship()["state"], ticks, land, land >> 4))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
-          ("p5_landing", p5_landing), ("p6_hud", p6_hud)]
+          ("p5_landing", p5_landing), ("p6_hud", p6_hud),
+          ("p7_sound", p7_sound)]
 
 
 def main(rom, mapfile, only=None):

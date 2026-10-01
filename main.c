@@ -38,6 +38,11 @@
  * frame, so the screen changes every frame, and the sibling's screen_stale()
  * dirty gate -- which exists to skip a rebuild that would write the same bytes
  * again -- would never once fire here.
+ *
+ * P7 is the sound: a burn on CH1, a landing on CH2, a crash on CH4, and the
+ * three APU boot writes that make any of them audible at all -- see the sound
+ * section below, and the essay on the boot lines for why silence here has no
+ * diagnostic.
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -115,6 +120,22 @@ static uint8_t keys, prev_keys, pressed;
  * becomes a local again, dump `lcc -S` and check for `ldhl sp, #0` between the
  * decode and the START test. */
 static uint8_t input;
+
+/* P7's two bytes of sound state, statics for the same reason `input` is (a
+ * local of main's lives on the stack, and that is the shape P6's comment above
+ * is about) and because both have to survive a tick.
+ *
+ * `burning` is the pad AND the tank as they stood BEFORE ship_step(), because
+ * ship_step is what spends the fuel: a reading taken after the step cuts the
+ * engine a tick early on the tick the tank runs dry, which is the kind of
+ * thing that only shows up as "the sound stops a hair before the ship does".
+ *
+ * `sfx_state` is the state the LAST tick's step left behind, and the change in
+ * it is the whole of what makes a landing or a crash an event: both are sticky
+ * (ship_step is a no-op once either has been reached), so without the edge a
+ * tick loop would re-fire the crash every frame for the rest of the life. */
+static uint8_t burning;
+static uint8_t sfx_state = ST_FLY;
 
 /* The family's VRAM lock, as a value tools/probe.py can read back.
  *
@@ -439,6 +460,61 @@ static void build_title(void)
     text(bg, 4, 12, "PRESS START");
 }
 
+/* ------------------------------------------------------------------ sound
+ * Three sounds, written where the sound is made.  No audio module for three
+ * register sets: the whole of the sound is the writes below.
+ *
+ * A burn rasps on CH1, a landing thumps on CH2, a crash hisses on CH4.  Every
+ * envelope is DECREASING -- NRx2 bit 3 is clear in all of them -- so each
+ * sound decays to silence on its own, and the two that are EVENTS are nothing
+ * but that decay: no code path here switches a channel off.
+ *
+ * The thrust is the one LEVEL, and a level needs a stop.  It is re-triggered
+ * on every tick the burn lasts, which is what turns one click into an engine,
+ * and the tick it stops writes NR12 = 0x08 -- volume 0 with the direction bit
+ * set, so the DAC stays ON and the channel is SILENCED rather than switched
+ * off, and the next press is an ordinary trigger.  NR12 = 0x00 would clear the
+ * DAC bit instead, and that is the switch-off this design avoids.
+ *
+ * The high frequency register's TOP BIT is the trigger; writing it restarts
+ * the channel from the first byte of its envelope.  Without it a second hit
+ * would only rewrite the registers of a channel that was already running, and
+ * the second sound would be inaudible -- a repeat that is silent with nothing
+ * on screen to say so.
+ *
+ * These are called from the tick loop's play branch, all three of them, and
+ * from NOWHERE else -- not from ship_draw(), not from the input decode above
+ * it.  A call in the draw path would fire on frames where nothing happened (a
+ * crash sound on every frame of a crashed life, since the state is sticky),
+ * and a call in the input decode would announce a thrust the empty tank
+ * refused, before the step that decides it. */
+static void play_thrust(void)
+{
+    NR11_REG = 0x80;                /* 50% duty, no length counter */
+    NR12_REG = 0x93;                /* volume 9, decreasing, period 3 */
+    NR13_REG = 0x00;                /* freq 0x300 -> 73 Hz: a low rasp */
+    NR14_REG = 0x83;                /* trigger + freq high bits */
+}
+
+/* CH2 has no hardware sweep -- that is NR10, which only CH1 has -- so "a
+ * sweep" here has to be an envelope that falls away fast over a low note,
+ * which is what a landing sounds like. */
+static void play_land(void)
+{
+    NR21_REG = 0x80;                /* 50% duty, no length counter */
+    NR22_REG = 0x81;                /* volume 8, decreasing, period 1: a thud */
+    NR23_REG = 0x00;                /* freq 0x400 -> 128 Hz */
+    NR24_REG = 0x84;                /* trigger + freq high bits */
+}
+
+static void play_crash(void)
+{
+    NR42_REG = 0xD3;                /* volume 13, decreasing, period 3 */
+    NR43_REG = 0x26;                /* 15-bit noise, shift 2, divisor 6 */
+    NR44_REG = 0x80;                /* trigger */
+}
+
+/* ------------------------------------------------------------------ main */
 void main(void)
 {
     DISPLAY_OFF;
@@ -452,6 +528,18 @@ void main(void)
      * against.  OBJ has its own register, and powering up leaves it to crt0. */
     BGP_REG = 0xE4;
     OBP0_REG = 0xE4;
+
+    /* The APU, on -- without this every play_* below is silence and nothing
+     * anywhere says so.  This ROM arrives here with NR52 bit 7 CLEAR: the boot
+     * ROM powers the APU up and GBDK's crt0 powers it back down, and while
+     * that bit is clear the sound registers cannot be written and read as
+     * zero, so every play_thrust/play_land/play_crash write would vanish.
+     * NR50 and NR51 go WITH it and not later: powering the APU on resets the
+     * routing, and a channel routed nowhere is the same silence by another
+     * route.  probe.p7_sound reads all three back. */
+    NR52_REG = 0x80;                /* APU on */
+    NR50_REG = 0x77;                /* both outputs, full volume */
+    NR51_REG = 0xFF;                /* all four channels to both outputs */
 
     /* The screen machine starts on the title, on the one mode that exists. */
     game = ST_TITLE;
@@ -551,10 +639,33 @@ void main(void)
             if (pressed & J_START)
                 ship_init();
 
+            /* Does this tick burn?  The pad AND the tank, read here because
+             * ship_step() below is what spends the fuel -- and the state,
+             * because UP held over a crashed ship is not a burn either. */
+            burning = (uint8_t)((ship.state == ST_FLY &&
+                                 (input & SHIP_THRUST) && ship.fuel) ? 1 : 0);
+
             /* One iteration IS one tick.  Physics runs once here, unpaced by
              * any dt accumulator, because wait_vbl_done() below already puts
              * the loop at one iteration per ~16.7 ms frame. */
             ship_step(&ship, input);
+
+            /* ---- sound.  The ONE place any of the play_* functions is called
+             * from -- see the essay above them for why the draw path and the
+             * decode above are both wrong places for one.  All three read what
+             * the step JUST did, so the two event sounds cannot announce a
+             * landing the physics has not classified yet. */
+            if (burning)
+                play_thrust();
+            else
+                NR12_REG = 0x08;    /* volume 0, DAC on: silent, not switched off */
+            if (ship.state != sfx_state) {
+                if (ship.state == ST_LANDED)
+                    play_land();
+                else if (ship.state == ST_CRASH)
+                    play_crash();
+            }
+            sfx_state = ship.state;
 
             /* The HUD, and only the HUD -- the terrain underneath it was
              * written when the field was handed over and has not moved since.
