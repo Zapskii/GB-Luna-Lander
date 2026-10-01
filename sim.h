@@ -22,6 +22,13 @@
  * from plain gcc like the rest of the physics. */
 #include "tables.h"
 
+/* The level: terrain[] and pads[].  Also pure -- stdint.h and `static const`
+ * and nothing else -- so the landing rule below can be compiled by gcc and
+ * run on the host.  This is the ONE copy of the level geometry: a second
+ * table of pad spans inside sim.h is the thing neither the probe nor a host
+ * test could tell from this one. */
+#include "terrain.h"
+
 /* ------------------------------------------------------------- 8.8 fixed */
 
 /* Advance a sub-pixel accumulator by velocity v (8.8 fixed, px/frame) and
@@ -95,7 +102,33 @@ typedef char thrust_fits_int16[(THRUST <= 127) ? 1 : -1];
 #define SHIP_ROT_L  0x02
 #define SHIP_ROT_R  0x04
 
+/* ----------------------------------------------------------------- world */
+
+/* The world is WORLD_COLS columns of 8 px: 160 px wide, and 160 is NOT a power
+ * of two.  Nothing here masks x with an `& WORLD_MASK` -- a mask would wrap at
+ * 256, ninety-six px past the right edge, and the seam would land off-screen
+ * where it reads as the ship flying away rather than coming round.  The wrap
+ * is two compares, and it is exact rather than approximate for a reassuring
+ * reason: the world is one screen, so with no camera yet the wrap IS what the
+ * player sees, and terrain.h's profile is periodic in WORLD_COLS so the seam
+ * is invisible. */
+#define WORLD_W ((uint16_t)(WORLD_COLS * 8))
+
+/* The ship is one 8x8 sprite (mkgfx.py).  SHIP_H is how far the top edge is
+ * above the underside, which is what the landing test needs; SHIP_W is how
+ * far the left edge is from the middle, which is what the column test needs. */
+#define SHIP_W 8
+#define SHIP_H 8
+
 /* ------------------------------------------------------------------ ship */
+
+/* What the ship is doing.  ST_FLY is 0 so a zeroed Ship is a flying one --
+ * main.c's spawn is written out field by field, but nothing anywhere should
+ * have to remember to say "and it is flying".  ship_step() is a no-op in the
+ * other two: the verdict a landing produced is the last thing a life does. */
+#define ST_FLY    0
+#define ST_LANDED 1
+#define ST_CRASH  2
 
 typedef struct {
     uint16_t x;        /* left edge, whole screen px */
@@ -106,11 +139,117 @@ typedef struct {
     int16_t  vy;
     uint8_t  heading;  /* index into thrust_dx/dy; 0 = nose up, += clockwise */
     uint16_t fuel;     /* fuel units left; 0 means thrust does NOTHING       */
+    uint8_t  state;    /* ST_FLY / ST_LANDED / ST_CRASH                      */
+    uint8_t  verdict;  /* the classify_landing() the contact produced        */
+    uint8_t  mult;     /* pad multiplier this landing scored; 0 if it did not */
 } Ship;
 
-/* One tick of the ship: rotate, burn, thrust, fall.  Still no collision and no
- * landing verdict -- those are P5's -- so the ship flies off the bottom of the
- * screen and keeps counting, which is what P3 did and what it still does.
+/* ------------------------------------------------------------- the landing
+ * Everything below is the RULE.  main.c draws the result and nothing else, so
+ * the verdict has to be a pure function of the ship and the ground under it --
+ * which is what lets tests/test_sim.c pin every threshold without an emulator,
+ * and what makes a check that read the SCREEN worthless: it would prove the
+ * renderer, not the rule. */
+
+/* Where the ship stands: the tile under its CENTRE, not under its left edge.
+ * An 8 px ship on an 8 px tile row straddles two columns, and its left edge is
+ * on the wrong one half the time -- Protector's human_ground_y uses the same
+ * (x + 4) >> 3 for the same reason. */
+static uint8_t ship_col(uint16_t x)
+{
+    uint8_t col = (uint8_t)((x + (SHIP_W >> 1)) >> 3);
+
+    /* The centre can fall off the right-hand end: x is wrapped into
+     * [0, WORLD_W), but a ship at x = 159 has its centre at pixel 163, which
+     * is world tile 20 -- past the last of WORLD_COLS.  On the torus that is
+     * tile 0, and ONE subtract is all it takes, because the centre is at most
+     * SHIP_W/2 px past the edge.  Without this, terrain[20] is a read off the
+     * end of the array and the ship lands on whatever byte happens to follow
+     * the level -- which still looks like terrain. */
+    if (col >= WORLD_COLS)
+        col = (uint8_t)(col - WORLD_COLS);
+    return col;
+}
+
+/* How far the nose is off straight up, in heading steps.  heading 0 is nose up
+ * (tables.h) and a full turn is ROT_STEPS, so anything past halfway is nearer
+ * the other way round; ROT_STEPS is a power of two, so the halfway is a shift
+ * and not a divide. */
+static uint8_t ship_tilt(const Ship *s)
+{
+    uint8_t h = s->heading;
+
+    return (uint8_t)(h > ROT_STEPS / 2 ? ROT_STEPS - h : h);
+}
+
+/* The multiplier of the pad whose span contains `col`, or 0 if that column is
+ * not a landing site at all.  Read out of terrain.h's own pads[] -- the level
+ * generator's table, not a second copy of the pads here.  A landing pad is
+ * the ONLY safe ground: the rule is "put it down on the marked spot", not
+ * "touch down anywhere gently". */
+static uint8_t pad_mult(uint8_t col)
+{
+    uint8_t i;
+
+    for (i = 0; i < PAD_COUNT; i++)
+        if (col >= pads[i].col0 && col <= pads[i].col1)
+            return pads[i].mult;
+    return 0;
+}
+
+/* THE THRESHOLD TABLE.  Each is the LARGEST value that still lands, compared
+ * with a strict `>` so the boundary is pinned from both sides at once: landing
+ * at exactly the threshold is safe ("just barely safe") and one unit past it
+ * is not ("just barely fatal").  Protector's human_fall_step uses the same
+ * single-`>` form at its own edge, for the same reason -- a `>=` anywhere here
+ * moves the edge and nothing on screen would say so.
+ *
+ * tests/test_sim.c straddles every one of these from both sides, so a
+ * classify_landing() that always answered SAFE fails a host test rather than
+ * quietly shipping a game where nothing can crash.
+ *
+ * All three are in 8.8 px/frame like every other velocity here, and all three
+ * are powers of two so no comparison costs a __mulint to set up. */
+#define SAFE_VY_MAX 128     /* 0.5 px/frame down; faster than this is TOO_FAST */
+#define SAFE_VX_MAX  64     /* 0.25 px/frame sideways; more is DRIFTING      */
+#define SAFE_TILT     1     /* one 22.5 deg step off nose up; more is TILTED */
+
+/* The verdicts.  SAFE is 0 so a ship that has not touched down yet reads as
+ * "nothing wrong so far" -- the state byte, not this, is what says a contact
+ * has happened, and it is the state byte that gates the step. */
+#define LAND_SAFE     0
+#define LAND_TOO_FAST 1
+#define LAND_DRIFTING 2
+#define LAND_TILTED   3
+#define LAND_CRASH    4
+
+/* How a contact went.  Checked in order, and the order is a CHOICE rather than
+ * a derivation -- so a host test pins it, because "which failure gets reported
+ * when the landing fails several tests" is exactly the kind of thing that
+ * drifts silently when someone reorders an if.
+ *
+ * Ground that is not a pad is fatal whatever else was true, so it is first:
+ * CRASH here means "no landing site", and the three graded verdicts below it
+ * only ever describe a ship that was over one.  Then the three thresholds in
+ * the order they are declared.
+ *
+ * The descent speed is the ship's vy AT the contact -- after this tick's
+ * gravity and thrust, because that is the speed it actually arrives with, not
+ * the speed it had last tick. */
+static uint8_t classify_landing(const Ship *s, uint8_t col)
+{
+    if (!pad_mult(col))
+        return LAND_CRASH;
+    if (s->vy > SAFE_VY_MAX)
+        return LAND_TOO_FAST;
+    if (s->vx > SAFE_VX_MAX || s->vx < -SAFE_VX_MAX)
+        return LAND_DRIFTING;
+    if (ship_tilt(s) > SAFE_TILT)
+        return LAND_TILTED;
+    return LAND_SAFE;
+}
+
+/* One tick of the ship: rotate, burn, thrust, fall, and -- P5 -- land.
  *
  * Fuel burns HERE and not in main.c's tick loop: the economy is part of the
  * step, so a frame that overruns its budget cannot quietly buy the player
@@ -122,7 +261,17 @@ typedef struct {
  * and the ship leaves rest a fraction of a pixel at a time. */
 static void ship_step(Ship *s, uint8_t in)
 {
-    int16_t tx, ty;
+    int16_t tx, ty, nx, ny;
+    uint16_t ground;
+    uint8_t col;
+
+    /* Landed or crashed: the life is over and the tick is a no-op.  Without
+     * this the next tick's gravity would carry the ship through the surface
+     * again and overwrite the verdict it had just earned -- and the ship would
+     * keep burning fuel and sliding after it had stopped, which reads as a
+     * landing that did not take. */
+    if (s->state != ST_FLY)
+        return;
 
     /* `& (ROT_STEPS - 1)` and not `% ROT_STEPS`: ROT_STEPS is a power of two
      * (tables.h says so), and a modulo through SDCC is __divsint, 231 bytes
@@ -150,8 +299,54 @@ static void ship_step(Ship *s, uint8_t in)
         s->vy += (int16_t)((THRUST * ty) >> 8);
     }
 
-    s->y = (uint16_t)(s->y + fix_step(&s->yf, s->vy));
-    s->x = (uint16_t)(s->x + fix_step(&s->xf, s->vx));
+    /* The wrap, and it is TWO COMPARES: 160 px is not 256, and an
+     * `& WORLD_MASK` here would wrap at 256 -- ninety-six px past the right
+     * edge of the world, off-screen, where the seam reads as the ship flying
+     * away rather than coming round.  Doing it before the collision rather
+     * than inside it is what keeps ship_col() in range for every x a player
+     * can reach, however fast it is travelling. */
+    nx = (int16_t)(s->x + (uint16_t)fix_step(&s->xf, s->vx));
+    if (nx < 0)
+        nx = (int16_t)(nx + (int16_t)WORLD_W);
+    else if (nx >= (int16_t)WORLD_W)
+        nx = (int16_t)(nx - (int16_t)WORLD_W);
+    s->x = (uint16_t)nx;
+
+    /* The ceiling.  y is a uint16_t and a thrusting ship climbs: with nothing
+     * to stop it, y underflows past zero to ~65000, which is "well below the
+     * surface" to the contact test below and turns a ship that flew off the
+     * top into one that crashed into the ground.  vy is deliberately left
+     * ALONE -- a ship pressed against the ceiling is still thrusting, and
+     * P4's checks pin the exact velocity. */
+    ny = (int16_t)(s->y + (uint16_t)fix_step(&s->yf, s->vy));
+    s->y = (uint16_t)(ny < 0 ? 0 : ny);
+
+    /* Contact: the underside reaching the surface row of the column the ship
+     * stands on.  terrain[col] is a TILE row and y is px, so this `<< 3` is
+     * the only place the two units meet; a `>> 3` here instead would put the
+     * ground eight rows high and still look like terrain. */
+    col = ship_col(s->x);
+    ground = (uint16_t)((uint16_t)terrain[col] << 3);
+
+    if ((uint16_t)(s->y + SHIP_H) >= ground) {
+        /* Rest ON the surface, not inside it, and classify BEFORE the speeds
+         * are cleared -- the verdict is about the speed it ARRIVED with. */
+        s->y = (uint16_t)(ground - SHIP_H);
+        s->yf = 0;
+        s->verdict = classify_landing(s, col);
+
+        s->vx = 0;
+        s->vy = 0;
+        s->xf = 0;
+
+        if (s->verdict == LAND_SAFE) {
+            s->state = ST_LANDED;
+            s->mult = pad_mult(col);
+        } else {
+            s->state = ST_CRASH;
+            s->mult = 0;
+        }
+    }
 }
 
 #endif

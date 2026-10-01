@@ -29,6 +29,13 @@
  * vector, the burn and the gravity all live in sim.h so tests/test_sim.c can
  * run them without an emulator; what is left here is the wiring, which is
  * exactly the half that probe.p4_thrust covers and the host cannot see.
+ *
+ * P5 is the landing.  The rule -- where the ship stands, what the ground under
+ * it is, how fast and how upright it arrived, and the pad multiplier that
+ * earns -- is entirely in sim.h, where tests/test_sim.c can straddle every
+ * threshold.  This file's share is three lines of wiring: a spawn that can be
+ * repeated, a START that repeats it, and a step that freezes once the state
+ * has stopped being ST_FLY.  Nothing here decides whether a landing was good.
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -69,6 +76,25 @@ static uint16_t frame;
  * storage, next to `keys`, and nowhere else. */
 static uint8_t keys, prev_keys, pressed;
 
+/* This tick's decoded pad.  A file-scope static and NOT a local of main()'s,
+ * which is the shape it wants to be and is also load-bearing:
+ *
+ * A local of main's lives at SP+0, and SDCC reaches it with `ldhl sp, #0` --
+ * an instruction that loads HL, and therefore H.  The decode below parks
+ * `pressed` in H to bit-test it, and SDCC's register allocator does not see
+ * the `ldhl sp, #n` that the peephole pass inserts AFTER it: H is assumed
+ * still live and the next test reads the STACK POINTER's high byte instead of
+ * the pad.  On a DMG SP is ~0xDFxx, so bit 7 of that byte is SET and
+ * `if (pressed & J_START)` fired on every tick that pressed had bit 5 -- the B
+ * button restarted the game while the code looked obviously correct, and the
+ * same clobber makes the A test read the wrong byte too.
+ *
+ * A static gets `ld hl, #_input` instead, an ordinary load the allocator
+ * tracks, so it reloads `pressed` rather than trusting H.  If this ever
+ * becomes a local again, dump `lcc -S` and check for `ldhl sp, #0` between the
+ * decode and the START test. */
+static uint8_t input;
+
 /* The family's VRAM lock, as a value tools/probe.py can read back.
  *
  * The PPU locks VRAM while the display is on, so every tile write has to happen
@@ -86,11 +112,45 @@ static uint8_t lcdc_at_load;
  * probe reads y and yf straight out of luna.map, so where this struct lives is
  * part of P3's contract, not an implementation detail.
  *
- * Spawn is the top of the screen, mid-world -- LANDER's world is exactly one
- * 160 px screen wide, so world x and screen x are the same number and 80 IS
- * the middle.  From rest, nose up (heading 0, the frame mkgfx.py renders at
- * 22.5 * 0 degrees), with a full tank. */
-static Ship ship = { 80, 16, 0, 0, 0, 0, 0, FUEL_START };
+ * main.c owns the storage; ship_init() below is the only thing that ever
+ * writes a fresh one, so the spawn exists in exactly one place. */
+static Ship ship;
+
+/* Where a life starts: high above the x2 pad, at rest, nose up, full tank.
+ *
+ * DIRECTLY over a pad, and over the x2 one, both on purpose.  P5's deliverable
+ * is "a hard drop crashes, a soft landing on a pad succeeds" -- that is a
+ * DESCENT, not a flight -- so the ship starts where the landing is rather than
+ * somewhere it would first have to be flown to, and the whole of the skill is
+ * arriving slowly.  The x2 pad and not the x1 one so the multiplier a good
+ * landing scores is 2: a score that was hardcoded instead of read out of
+ * terrain.h's pads[] could not fake it.
+ *
+ * x = 108 puts the ship's CENTRE -- what sim.h's ship_col() tests, x + SHIP_W/2
+ * -- on column 14, inside PAD_HIGH's 13..14, with eight whole pixels of slack
+ * either side.  y = 16 puts the ship's UNDERSIDE 48 px above that pad's
+ * surface, which from rest arrives at about 620/256 px/frame: nearly five
+ * times SAFE_VY_MAX, so a drop with no hand on the stick is a crash rather
+ * than a coin toss. */
+#define SPAWN_X 108
+#define SPAWN_Y 16
+
+static void ship_init(void)
+{
+    ship.x = SPAWN_X;
+    ship.y = SPAWN_Y;
+    ship.xf = 0;
+    ship.yf = 0;
+    ship.vx = 0;
+    ship.vy = 0;
+    ship.heading = 0;
+    ship.fuel = FUEL_START;
+    ship.state = ST_FLY;
+    /* Nothing has touched down yet, and SAFE is 0 rather than a claim: the
+     * state byte is what says whether this means anything. */
+    ship.verdict = LAND_SAFE;
+    ship.mult = 0;
+}
 
 /* Blit the level surface into the BG tilemap: one tilemap column per world
  * column.  There is no camera yet, so world column N IS screen column N and the
@@ -138,10 +198,6 @@ static void ship_draw(void)
 
 void main(void)
 {
-    /* This tick's decoded pad.  Declared here rather than in the loop because
-     * SDCC wants declarations at the top of a block. */
-    uint8_t input;
-
     DISPLAY_OFF;
 
     /* set_bkg_data/set_sprite_data take a tile COUNT, not a last id: passing 0
@@ -160,6 +216,12 @@ void main(void)
      * display went on at any point before this line, bit 7 is set here.  It has
      * to come after draw_terrain(), which is the last thing that touches VRAM. */
     lcdc_at_load = LCDC_REG;
+
+    /* The ship, before the display goes on.  ship_init() rather than a brace
+     * initialiser on the declaration, because START has to reach exactly this
+     * state from inside the tick loop and two copies of the spawn would drift
+     * -- and the one that drifted would be the one nobody restarts from. */
+    ship_init();
 
     /* OAM is not screen space: the PPU draws an 8x8 sprite with its top-left at
      * (OAM_x - 8, OAM_y - 16).  move_sprite() writes the raw bytes and does NOT
@@ -200,6 +262,14 @@ void main(void)
         if (keys & J_UP)    input |= SHIP_THRUST;
         if (pressed & J_A)  input |= SHIP_ROT_L;
         if (pressed & J_B)  input |= SHIP_ROT_R;
+
+        /* START restarts the life -- after a crash, after a landing, or
+         * mid-flight if the player simply wants another go.  An EDGE and not a
+         * level, like A and B: read `keys` here and holding START would reset
+         * the ship on every tick, so it would never fall at all and the game
+         * would look frozen rather than restarted. */
+        if (pressed & J_START)
+            ship_init();
 
         /* One iteration IS one tick.  Physics runs once here, unpaced by any
          * dt accumulator, because wait_vbl_done() below already puts the loop

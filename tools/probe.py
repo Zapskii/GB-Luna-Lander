@@ -71,18 +71,50 @@ PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at
 FRAMES = 120                    # how long the tick-rate assertion runs
 
 # sim.h's Ship, as SDCC laid it out -- offsets taken from the compiler's own
-# CDB record for it (`T:Fmain$__00000005[...]` in luna.cdb), not guessed:
+# CDB record for it (`T:Fmain$__00000006[...]` in luna.cdb), not guessed:
 #   x @0 (u16)  y @2 (u16)  xf @4  yf @5  vx @6 (i16)  vy @8 (i16)
-#   heading @10 (u8)  fuel @11 (u16)                                 = 13 bytes
+#   heading @10 (u8)  fuel @11 (u16)
+#   state @13  verdict @14  mult @15                                 = 16 bytes
 # Mirrored here for the same reason the tile ids are: a probe that asked sim.h
 # for its own struct could not tell a reordered struct from a correct one, and
 # reordering it is exactly how the fraction byte ends up somewhere this check
 # is not looking.  fuel really is at an ODD offset -- SDCC packs structs, it
 # does not pad them -- which is worth writing down because a probe that assumed
-# alignment would read heading's neighbour.
-SHIP_LEN = 13
+# alignment would read heading's neighbour.  P5's three bytes are APPENDED so
+# that everything above them kept its address: this check reads a P4-era
+# offset table plus three, and would silently misread state as fuel if the new
+# fields had been inserted anywhere else.
+SHIP_LEN = 16
 SHIP_X, SHIP_Y, SHIP_XF, SHIP_YF, SHIP_VX, SHIP_VY = 0, 2, 4, 5, 6, 8
 SHIP_HEADING, SHIP_FUEL = 10, 11
+SHIP_STATE, SHIP_VERDICT, SHIP_MULT = 13, 14, 15
+
+# sim.h's landing constants, mirrored for the same reason.  ST_FLY is what a
+# ship that is still flying reads; LAND_* are the verdicts classify_landing()
+# can return, and the check names the one it expects rather than "not SAFE" --
+# a TOO_FAST that reported CRASH would be a rule nobody could read a score off.
+ST_FLY, ST_LANDED, ST_CRASH = 0, 1, 2
+LAND_SAFE, LAND_TOO_FAST, LAND_DRIFTING, LAND_TILTED, LAND_CRASH = 0, 1, 2, 3, 4
+
+# The ship is one 8x8 sprite (mkgfx.py), so this is how far its top edge is
+# above the surface it rests on.
+SHIP_W = SHIP_H = 8
+
+# main.c's spawn, mirrored: the ship starts in flight directly over the x2 pad,
+# which is what makes "a hard drop" and "a soft descent" the same journey with
+# different hands on the stick.
+SPAWN_X, SPAWN_Y = 108, 16
+
+# How long each half of the check may take before it gives up and FAILS.  A
+# stuck ROM has to answer 1, not hang the harness into a timeout, which would
+# answer 2 and look like a broken probe rather than a broken game.
+DROP_LIMIT = 120                # a hard drop lands in about 39 ticks
+DESCENT_LIMIT = 1500            # the scripted descent takes about 300
+
+# The descent speed the soft-landing pilot burns above, in 8.8 px/frame.  Well
+# under sim.h's SAFE_VY_MAX, because a pilot that flew the edge of the
+# threshold would make this check a statement about the pilot and not the game.
+VY_HOLD = 32
 
 # sim.h's gravity and thrust knobs, mirrored.  P5 retunes the feel and WILL
 # move these; the identities below -- the exact integrals and the exact
@@ -169,7 +201,26 @@ class Game:
         return {"x": u16(SHIP_X), "y": u16(SHIP_Y),
                 "xf": b[SHIP_XF], "yf": b[SHIP_YF],
                 "vx": s16(SHIP_VX), "vy": s16(SHIP_VY),
-                "heading": b[SHIP_HEADING], "fuel": u16(SHIP_FUEL)}
+                "heading": b[SHIP_HEADING], "fuel": u16(SHIP_FUEL),
+                "state": b[SHIP_STATE], "verdict": b[SHIP_VERDICT],
+                "mult": b[SHIP_MULT]}
+
+    def boot(self, limit=GRAV_POLL):
+        """Run until the CARTRIDGE's own tick loop is running, and return how
+        many frames that took -- `frame` is 0 until crt0 has run main().
+
+        PyBoy runs the real boot ROM first, which is a couple of seconds of the
+        cartridge not existing yet, so a fixed frame count would either read
+        zeroes or catch a ship that had been falling since before the check
+        started.  Everything that samples a falling ship wants this, and wants
+        it identical: a check that poked its own poll would be comparing itself
+        against a slightly different tick.
+        """
+        n = 0
+        while self.u16("frame") == 0 and n < limit:
+            self.run(1)
+            n += 1
+        return n
 
     def oam(self, slot=0):
         """The raw OAM bytes for one sprite slot: y, x, tile, attrs."""
@@ -355,17 +406,11 @@ def p3_gravity(g):
     if not g.need("ship"):
         return
 
-    # PyBoy runs the real boot ROM first, and that is a couple of seconds of
-    # the CARTRIDGE not existing yet -- p1_boot's 150 frames covers it, and a
-    # read before it returns nothing but zeroes.  This cannot simply run 150
-    # frames and look, though: the ship starts falling on the cartridge's first
-    # tick, so by then it has been falling for a second and a half and its y
-    # has been round the 16-bit wrap.  Poll for the ROM's own loop instead --
-    # `frame` is 0 until crt0 has run main() -- and sample from there.
-    boot = 0
-    while g.u16("frame") == 0 and boot < GRAV_POLL:
-        g.run(1)
-        boot += 1
+    # The ship starts falling on the cartridge's FIRST tick, so every sample
+    # below has to be taken from the ROM's own loop rather than from a fixed
+    # frame count: PyBoy runs the real boot ROM first, and a read before that
+    # is over returns nothing but zeroes.
+    boot = g.boot()
     if not check(0 < boot < GRAV_POLL,
                  "the ROM reached its own tick loop (frame is counting after "
                  "%d frames)" % boot):
@@ -451,10 +496,7 @@ def p4_thrust(g):
     # The same poll p3_gravity uses: the ship is falling from the cartridge's
     # first tick, so sample from the ROM's own loop rather than from a fixed
     # frame count, which would catch it already most of the way down.
-    boot = 0
-    while g.u16("frame") == 0 and boot < GRAV_POLL:
-        g.run(1)
-        boot += 1
+    boot = g.boot()
     if not check(0 < boot < GRAV_POLL,
                  "the ROM reached its own tick loop (frame is counting after "
                  "%d frames)" % boot):
@@ -565,8 +607,133 @@ def p4_thrust(g):
           "underflowing (heading %d)" % g.ship()["heading"])
 
 
+# ------------------------------------------------------------------ P5 -----
+def p5_landing(g):
+    """A hard drop crashes; a soft descent onto the pad lands and scores it.
+
+    The whole phase is a RULE in sim.h, so this reads the rule's own output --
+    the state, the verdict and the multiplier the ROM wrote into its own
+    storage -- and never the screen.  A check that read tiles would prove the
+    renderer, and the renderer is three lines of wiring; tools/shot.py is what
+    that is for.
+
+    Both halves fly the same journey from the same spawn.  The ship starts in
+    flight directly above the x2 pad, so nothing here has to steer: the drop
+    does nothing at all, and the descent burns thrust whenever it is falling
+    faster than VY_HOLD.  That is what makes this a check about the VERDICT
+    rather than about a pilot -- one hand on the stick is the entire
+    difference between the two outcomes.
+    """
+    print("P5 landing")
+    # A symbol this phase reads being ABSENT is an assertion failure, not a
+    # harness error.  terrain/pads are P2's and ship is P3's, so on those ROMs
+    # this answers 1 -- but the real power gate is the P4 ROM, where every
+    # symbol is present and the LANDING is not, and it is the behaviour below
+    # (the ship coming to rest on the surface) that has to answer 1 there.
+    if not g.need("ship", "terrain", "pads"):
+        return
+
+    boot = g.boot()
+    if not check(0 < boot < GRAV_POLL,
+                 "the ROM reached its own tick loop (frame is counting after "
+                 "%d frames)" % boot):
+        return
+
+    # The level, out of the ROM's OWN memory, and the column the ship's own
+    # spawn x stands on.  The check has to agree with the ROM about where the
+    # ship is and what is under it -- reading main.c's or sim.h's constants
+    # here would make this a check on the comments.
+    h = g.var("terrain", WORLD_COLS)
+    raw = g.var("pads", PAD_COUNT * 3)
+    pads = [(raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]) for i in range(PAD_COUNT)]
+
+    s0 = g.ship()
+    check(s0["x"] == SPAWN_X and s0["state"] == ST_FLY,
+          "the ship spawns in flight above the pad (x %d, state %d)"
+          % (s0["x"], s0["state"]))
+
+    col = (s0["x"] + SHIP_W // 2) >> 3
+    ground = h[col] * 8
+    under = [m for (c0, c1, m) in pads if c0 <= col <= c1]
+    # Deliberately NOT an early return.  A ROM with no landing rule at all --
+    # the previous phase's -- fails the two assertions above, and it has to
+    # fail everything below them as well rather than be excused from the half
+    # of the check that is actually about landing.  `want` is the multiplier
+    # the pad table names for this column, or 0 for ground that is not a pad.
+    check(bool(under),
+          "and what is under it is a pad, so the drop has somewhere to land "
+          "(column %d of %d, pads %r, terrain %r)"
+          % (col, WORLD_COLS, pads, h))
+    want = under[0] if under else 0
+
+    # ---- the hard drop: no buttons at all --------------------------------
+    # Gravity from rest arrives at about 620/256 px/frame, nearly five times
+    # SAFE_VY_MAX, so the verdict is TOO_FAST -- not CRASH, which is reserved
+    # for ground that is not a pad at all.
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DROP_LIMIT:
+        g.run(1)
+        ticks += 1
+    s = g.ship()
+    check(s["state"] == ST_CRASH,
+          "a hard drop ends in the crash state (state %d after %d ticks)"
+          % (s["state"], ticks))
+    # THIS is the assertion with power, and the reason the rest of the check
+    # could not stand in for it: it holds whether or not the state byte reads
+    # sanely, because it is about where the ship IS.  A ROM with no collision
+    # -- the previous phase's -- falls straight through this row and fails here
+    # however the three bytes appended to Ship happen to land in memory.
+    check(s["y"] + SHIP_H == ground,
+          "and it comes to rest ON the surface rather than falling through it "
+          "(underside %d, surface %d)" % (s["y"] + SHIP_H, ground))
+    check(s["verdict"] == LAND_TOO_FAST,
+          "the verdict says why: the pad was there, the arrival was not "
+          "(verdict %d, expected TOO_FAST)" % s["verdict"])
+    check(s["mult"] == 0,
+          "and a crash scores nothing (%d)" % s["mult"])
+
+    # ---- START restarts --------------------------------------------------
+    # An EDGE, so 8 held frames are one restart -- and the restart landing on
+    # the last of them is why the ship is allowed a few ticks of falling below.
+    g.run(8, "S")
+    g.run(1)
+    s = g.ship()
+    check(s["state"] == ST_FLY and s["y"] < SPAWN_Y + 16 and
+          s["fuel"] == FUEL_START and s["mult"] == 0,
+          "START restarts the life -- back in flight near the spawn with a "
+          "full tank (state %d, y %d, fuel %d, mult %d)"
+          % (s["state"], s["y"], s["fuel"], s["mult"]))
+
+    # ---- the soft descent ------------------------------------------------
+    # Burn whenever the ship is falling faster than VY_HOLD.  Thrust at heading
+    # 0 is straight up, and the ship is never rotated here, so this is a
+    # one-dimensional descent: it comes down the same column it started on.
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1, "U" if g.ship()["vy"] > VY_HOLD else "")
+        ticks += 1
+    s = g.ship()
+    check(s["state"] == ST_LANDED,
+          "a controlled descent onto the pad ends in the LANDED state "
+          "(state %d after %d ticks, vy %d)" % (s["state"], ticks, s["vy"]))
+    check(s["verdict"] == LAND_SAFE,
+          "and the verdict is SAFE (verdict %d)" % s["verdict"])
+    check(s["y"] + SHIP_H == ground and s["vy"] == 0,
+          "and it is resting on the surface with nothing left over (underside "
+          "%d, surface %d, vy %d)" % (s["y"] + SHIP_H, ground, s["vy"]))
+    # The multiplier the ROM scored, against the multiplier the ROM's OWN pads
+    # table gives that column -- and then against the literal 2, because a
+    # check that only compared the two would pass on a score hardcoded to
+    # whatever the table said.
+    check(s["mult"] == want == 2,
+          "the landing scores the pad's multiplier out of terrain.h -- x2 for "
+          "the pad under the spawn (scored %d, table says %d)"
+          % (s["mult"], want))
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
-          ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust)]
+          ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
+          ("p5_landing", p5_landing)]
 
 
 def main(rom, mapfile, only=None):

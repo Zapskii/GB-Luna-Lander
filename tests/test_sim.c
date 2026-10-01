@@ -23,6 +23,16 @@
  * into the wrong quadrant, which reads as a rotation bug rather than a width
  * one.  It is asserted here, not assumed.
  *
+ * P5 is the landing verdict, and this file is where it is ACTUALLY verified.
+ * Every threshold is straddled from both directions -- a case at the edge and
+ * a case one unit past it, so "just barely safe" and "just barely fatal" are
+ * both written down, one `>` at the exact edge as Protector's human_fall_step
+ * does.  That is what makes the rule unfakeable here: swap the rule for one
+ * that always answers SAFE and several of these fail, instead of a game where
+ * nothing can crash and nothing on screen saying so.  The verdict has to come
+ * out of sim.h -- a check that read the screen would prove the renderer, which
+ * is three lines of wiring in main.c.
+ *
  *     make test
  */
 #include <stdarg.h>
@@ -48,13 +58,16 @@ static void check(int cond, const char *fmt, ...)
     printf("\n");
 }
 
-/* A ship exactly as main.c spawns it: rest, nose up, full tank.  Every case
- * below starts from here rather than from whatever the last one left behind. */
+/* A ship exactly as main.c spawns it: rest, nose up, full tank, FLYING.  Every
+ * case below starts from here rather than from whatever the last one left
+ * behind -- and the state byte is part of "exactly", because ship_step() is a
+ * no-op on a ship that is not ST_FLY and a test that forgot it would pass
+ * every assertion by never running the step at all. */
 static Ship spawn(void)
 {
     Ship s;
 
-    s.x = 80;
+    s.x = 108;
     s.y = 16;
     s.xf = 0;
     s.yf = 0;
@@ -62,6 +75,24 @@ static Ship spawn(void)
     s.vy = 0;
     s.heading = 0;
     s.fuel = FUEL_START;
+    s.state = ST_FLY;
+    s.verdict = LAND_SAFE;
+    s.mult = 0;
+    return s;
+}
+
+/* A ship ARRIVING at its landing: the spawn, but with the speeds and attitude
+ * the verdict is actually about.  classify_landing() reads only these three
+ * and the column under the ship, so this is its whole input -- which is what
+ * makes the threshold table below straddle each edge with no arithmetic in
+ * between that could round it off. */
+static Ship arriving(int16_t vx, int16_t vy, uint8_t heading)
+{
+    Ship s = spawn();
+
+    s.vx = vx;
+    s.vy = vy;
+    s.heading = heading;
     return s;
 }
 
@@ -118,8 +149,14 @@ int main(void)
          * every tick: y*256 + yf == sum of GRAV*i for i = 1..n.  A fraction
          * byte in a local produces a sum of v >> 8 instead, which falls behind
          * this by a pixel in the first second and never catches up. */
+        /* The count is bounded by the GROUND, not by arithmetic: the spawn is
+         * 48 px above the pad and free fall reaches it after about 39 ticks,
+         * after which the ship is landing and no longer a free-falling body.
+         * 32 leaves margin, and the state assertion below says so out loud --
+         * a run that reached the ground would otherwise fail here as though
+         * fix_step had broken. */
         s = spawn();
-        for (i = 1; i <= 60; i++) {
+        for (i = 1; i <= 32; i++) {
             uint32_t pos;
             ship_step(&s, 0);
             pos = ((uint32_t)(s.y - 16) << 8) + s.yf;
@@ -127,8 +164,8 @@ int main(void)
                 pos != (uint32_t)GRAV * i * (i + 1) / 2)
                 break;
         }
-        check(i == 61 && s.y > 16,
-              "sixty ticks of gravity are exactly the 8.8 integral of the "
+        check(i == 33 && s.y > 16 && s.state == ST_FLY,
+              "32 ticks of gravity are exactly the 8.8 integral of the "
               "velocity ramp, tick by tick");
     }
 
@@ -289,6 +326,201 @@ int main(void)
          * run the tank down by wiggling the stick. */
         check(s.fuel == FUEL_START,
               "rotation costs no fuel (%d of %d left)", s.fuel, FUEL_START);
+    }
+
+    /* ------------------------------------------------------------ P5 ---- */
+
+    {
+        /* THE THRESHOLD TABLE, straddled from both sides.  Each edge is
+         * pinned by two cases one unit apart, so "just barely safe" and "just
+         * barely fatal" are both written down: a `>=` where sim.h has a `>`
+         * moves every one of these, and nothing on screen would say so.
+         *
+         * This block is also the reason a classify_landing() that always
+         * answered SAFE could not ship: the TOO_FAST case below it fails, so
+         * the landing system is verified rather than assumed.  The verdict has
+         * to come out of sim.h -- a check that read the screen would prove the
+         * renderer, which is three lines of wiring in main.c. */
+        uint8_t pad = pads[PAD_HIGH].col0;
+        uint8_t pad1 = pads[PAD_HIGH].col1;
+        uint8_t gap = 0;                /* no pad covers column 0 */
+        Ship s;
+
+        check(pad_mult(pad) == pads[PAD_HIGH].mult &&
+              pad_mult(pads[PAD_LOW].col0) == pads[PAD_LOW].mult &&
+              pad_mult(gap) == 0,
+              "the pad lookup reads terrain.h's own table: column %d is x%d, "
+              "column %d is x%d, column %d is bare", pad,
+              pads[PAD_HIGH].mult, pads[PAD_LOW].col0, pads[PAD_LOW].mult, gap);
+
+        /* ---- how fast it arrived (downwards) ---- */
+        s = arriving(0, SAFE_VY_MAX, 0);
+        check(classify_landing(&s, pad) == LAND_SAFE,
+              "arriving at exactly SAFE_VY_MAX (%d) still lands", SAFE_VY_MAX);
+        s = arriving(0, (int16_t)(SAFE_VY_MAX + 1), 0);
+        check(classify_landing(&s, pad) == LAND_TOO_FAST,
+              "and one 1/256 px/frame faster does not -- TOO_FAST");
+        s = arriving(0, (int16_t)(-SAFE_VY_MAX), 0);
+        check(classify_landing(&s, pad) == LAND_SAFE,
+              "a ship still climbing at contact is not arriving too fast "
+              "either");
+
+        /* ---- how far sideways ---- */
+        s = arriving(SAFE_VX_MAX, 0, 0);
+        check(classify_landing(&s, pad) == LAND_SAFE,
+              "drifting at exactly SAFE_VX_MAX (%d) lands", SAFE_VX_MAX);
+        s = arriving((int16_t)(-SAFE_VX_MAX), 0, 0);
+        check(classify_landing(&s, pad) == LAND_SAFE,
+              "and the same speed the other way is the same speed");
+        s = arriving((int16_t)(SAFE_VX_MAX + 1), 0, 0);
+        check(classify_landing(&s, pad) == LAND_DRIFTING,
+              "one 1/256 px/frame more is DRIFTING");
+        s = arriving((int16_t)(-(SAFE_VX_MAX + 1)), 0, 0);
+        check(classify_landing(&s, pad) == LAND_DRIFTING,
+              "on both sides -- a one-sided threshold would let the ship slide "
+              "left to a landing");
+
+        /* ---- how far off nose-up ---- */
+        s = arriving(0, 0, SAFE_TILT);
+        check(classify_landing(&s, pad) == LAND_SAFE,
+              "a tilt of exactly SAFE_TILT step(s) lands");
+        s = arriving(0, 0, (uint8_t)(ROT_STEPS - SAFE_TILT));
+        check(classify_landing(&s, pad) == LAND_SAFE,
+              "...and so is the same tilt the other way round the circle, "
+              "which is where a one-sided test would go wrong");
+        s = arriving(0, 0, (uint8_t)(SAFE_TILT + 1));
+        check(classify_landing(&s, pad) == LAND_TILTED,
+              "one step further round is TILTED");
+        s = arriving(0, 0, (uint8_t)(ROT_STEPS - SAFE_TILT - 1));
+        check(classify_landing(&s, pad) == LAND_TILTED,
+              "on both sides");
+
+        /* ---- and where it arrived ---- */
+        s = arriving(0, 0, 0);
+        check(classify_landing(&s, pad) == LAND_SAFE &&
+              classify_landing(&s, pad1) == LAND_SAFE,
+              "the pad's span is exactly its two columns (cols %d..%d)",
+              pad, pad1);
+        check(classify_landing(&s, (uint8_t)(pad - 1)) == LAND_CRASH &&
+              classify_landing(&s, (uint8_t)(pad1 + 1)) == LAND_CRASH,
+              "and the columns either side of it are CRASH -- a perfect "
+              "landing on ground that is not a pad is still a crash");
+
+        /* The ORDER, pinned.  Which failure a landing that failed several
+         * reports is a choice sim.h makes; this is the assertion that stops
+         * someone reordering the ifs from changing it silently. */
+        s = arriving((int16_t)(SAFE_VX_MAX + 1), (int16_t)(SAFE_VY_MAX + 1),
+                     (uint8_t)(SAFE_TILT + 1));
+        check(classify_landing(&s, pad) == LAND_TOO_FAST,
+              "a landing that fails every test reports the first one sim.h "
+              "checks -- TOO_FAST");
+        check(classify_landing(&s, gap) == LAND_CRASH,
+              "and ground that is not a pad outranks all of them");
+    }
+
+    {
+        /* The world is 160 px, and every x in it has to name a real column:
+         * a ship at the right edge has its CENTRE four px past the end, where
+         * terrain[] would be read one byte off. */
+        uint16_t x;
+        uint8_t off = 0;
+
+        for (x = 0; x < WORLD_W; x++)
+            if (ship_col(x) >= WORLD_COLS)
+                off++;
+        check(off == 0,
+              "every x the ship can hold names a column of terrain[] (%d of "
+              "%d are off the end)", off, WORLD_W);
+    }
+
+    {
+        /* The same rule, driven through the step -- which is where the state
+         * machine, the resting position and the score live. */
+        Ship s, before;
+        uint8_t i;
+        uint8_t pad = pads[PAD_HIGH].col0;
+        uint16_t ground = (uint16_t)((uint16_t)terrain[pad] << 3);
+        uint16_t gx = (uint16_t)(pad * 8);      /* ship_col(gx) == pad */
+
+        /* Touching down, not falling into it: already on the surface, and
+         * this tick's gravity is the speed it arrives with. */
+        s = spawn();
+        s.x = gx;
+        s.y = (uint16_t)(ground - SHIP_H);
+        ship_step(&s, 0);
+        check(s.state == ST_LANDED && s.verdict == LAND_SAFE &&
+              s.y + SHIP_H == ground && s.mult == pads[PAD_HIGH].mult,
+              "a gentle contact sets ST_LANDED, rests it ON the surface and "
+              "scores the pad's x%d", pads[PAD_HIGH].mult);
+
+        /* Two px of free fall lands and three does not.  The threshold table
+         * above is exact; this is the same edge with the real step bolted on,
+         * so a rule that were right in isolation but wired up wrong still
+         * fails here. */
+        s = spawn();
+        s.x = gx;
+        s.y = (uint16_t)(ground - SHIP_H - 2);
+        for (i = 0; i < 40 && s.state == ST_FLY; i++)
+            ship_step(&s, 0);
+        check(s.state == ST_LANDED && s.y + SHIP_H == ground,
+              "two px of free fall arrives inside SAFE_VY_MAX and lands "
+              "(state %d, underside %d of %d)", s.state, s.y + SHIP_H, ground);
+
+        s = spawn();
+        s.x = gx;
+        s.y = (uint16_t)(ground - SHIP_H - 3);
+        for (i = 0; i < 40 && s.state == ST_FLY; i++)
+            ship_step(&s, 0);
+        check(s.state == ST_CRASH && s.verdict == LAND_TOO_FAST && s.mult == 0,
+              "three px of free fall does not -- ST_CRASH, TOO_FAST, nothing "
+              "scored (state %d, verdict %d, mult %d)",
+              s.state, s.verdict, s.mult);
+
+        /* And a stopped ship STAYS stopped.  Without the state gate at the top
+         * of ship_step, the next tick's gravity would carry it through the
+         * surface, rewrite the verdict and burn fuel on a ship that is already
+         * down. */
+        before = s;
+        for (i = 0; i < 16; i++)
+            ship_step(&s, SHIP_THRUST);
+        check(s.y == before.y && s.vy == before.vy && s.vx == before.vx &&
+              s.fuel == before.fuel && s.state == before.state &&
+              s.verdict == before.verdict && s.mult == before.mult,
+              "a crashed ship is frozen: 16 ticks of held thrust move it, "
+              "burn it and reclassify it by nothing at all");
+
+        /* The ceiling.  y is a uint16_t, so a climbing ship underflows past
+         * zero to about 65000 -- which is "far below the surface" to the
+         * contact test, and turns a ship that flew off the top into one that
+         * crashed into the ground. */
+        s = spawn();
+        for (i = 0; i < 60; i++)
+            ship_step(&s, SHIP_THRUST);
+        check(s.y == 0 && s.state == ST_FLY,
+              "a ship thrusting off the top is held at y 0 instead of "
+              "underflowing to 65000 and reading as a crash (y %d, state %d)",
+              s.y, s.state);
+
+        /* The wrap.  160 is not 256, and these two are the family's named
+         * trap: with an `& WORLD_MASK` the first case leaves the ship at
+         * x 255, off the right edge of a 160 px world, where it reads as
+         * flying away rather than coming round. */
+        s = spawn();
+        s.y = 0;
+        s.x = 0;
+        s.vx = -256;
+        ship_step(&s, 0);
+        check(s.x == WORLD_W - 1,
+              "leaving the LEFT edge arrives at x %d, not at 255 (x %d)",
+              WORLD_W - 1, s.x);
+
+        s = spawn();
+        s.y = 0;
+        s.x = (uint16_t)(WORLD_W - 1);
+        s.vx = 256;
+        ship_step(&s, 0);
+        check(s.x == 0,
+              "and leaving the RIGHT edge arrives at x 0 (x %d)", s.x);
     }
 
     if (failed) {
