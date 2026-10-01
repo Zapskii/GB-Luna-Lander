@@ -6,17 +6,18 @@
 #   make shot     write a screenshot to /tmp/luna.png
 #   make gfx      regenerate gfx.h from mkgfx.py
 #   make level    regenerate terrain.h from tools/mklevel.py
+#   make tab      regenerate tables.h from tools/mktab.py
 #   make usage    ROM/RAM headroom
 #   make image    build the gbdk-dev Docker image used when GBDK_HOME is absent
 #   make clean
 
 ROM    = luna.gb
 CFILES = main.c
-# gfx.h and terrain.h are on the line deliberately: they are GENERATED, and a
-# make that does not know that says "nothing to do" after `make gfx` / `make
-# level`, leaving the OLD ROM in place for the checks to grade.  That is a
-# false PASS, and it is silent.
-SRCS   = $(CFILES) gfx.h terrain.h
+# gfx.h, terrain.h and tables.h are on the line deliberately: they are
+# GENERATED, and a make that does not know that says "nothing to do" after
+# `make gfx` / `make level` / `make tab`, leaving the OLD ROM in place for the
+# checks to grade.  That is a false PASS, and it is silent.
+SRCS   = $(CFILES) gfx.h terrain.h tables.h
 
 # The harness needs PyBoy.  Prefer this project's venv, then the one Protector
 # keeps (it has PyBoy in it), then whatever python3 is on PATH:
@@ -87,6 +88,9 @@ gfx:
 level:
 	python3 tools/mklevel.py
 
+tab:
+	python3 tools/mktab.py
+
 usage: $(ROM)
 	$(RUN) $(USAGE) $(ROM:.gb=.map) -g
 
@@ -97,4 +101,4 @@ clean:
 	rm -f $(ROM) *.map *.noi *.o *.lst *.sym *.ihx *.asm *.adb *.cdb \
 	      tests/test_sim $(ROM:.gb=.sav) $(ROM).ram
 
-.PHONY: all test gfx level usage image clean sym probe fps shot
+.PHONY: all test gfx level tab usage image clean sym probe fps shot
