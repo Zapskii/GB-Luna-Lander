@@ -72,20 +72,40 @@ FRAMES = 120                    # how long the tick-rate assertion runs
 
 # sim.h's Ship, as SDCC laid it out -- offsets taken from the compiler's own
 # CDB record for it (`T:Fmain$__00000005[...]` in luna.cdb), not guessed:
-#   x @0 (u16)  y @2 (u16)  xf @4  yf @5  vx @6 (i16)  vy @8 (i16)  = 10 bytes
+#   x @0 (u16)  y @2 (u16)  xf @4  yf @5  vx @6 (i16)  vy @8 (i16)
+#   heading @10 (u8)  fuel @11 (u16)                                 = 13 bytes
 # Mirrored here for the same reason the tile ids are: a probe that asked sim.h
 # for its own struct could not tell a reordered struct from a correct one, and
 # reordering it is exactly how the fraction byte ends up somewhere this check
-# is not looking.
-SHIP_LEN = 10
+# is not looking.  fuel really is at an ODD offset -- SDCC packs structs, it
+# does not pad them -- which is worth writing down because a probe that assumed
+# alignment would read heading's neighbour.
+SHIP_LEN = 13
 SHIP_X, SHIP_Y, SHIP_XF, SHIP_YF, SHIP_VX, SHIP_VY = 0, 2, 4, 5, 6, 8
+SHIP_HEADING, SHIP_FUEL = 10, 11
 
-# sim.h's gravity knob, mirrored.  P5 retunes the feel and WILL move this; the
-# p3_gravity identity below is what has to keep holding when it does.
+# sim.h's gravity and thrust knobs, mirrored.  P5 retunes the feel and WILL
+# move these; the identities below -- the exact integrals and the exact
+# fuel burn -- are what have to keep holding when it does.
 GRAV = 16
+THRUST = 32
+
+# sim.h's fuel economy, mirrored for the same reason: the tank and the burn
+# rate are P5's knobs, and the check is written as "the tank empties in
+# FUEL_START / FUEL_BURN ticks" rather than against a hardcoded count.
+FUEL_START = 600
+FUEL_BURN = 1
+
+# tables.h's heading count and gfx.h's first ship tile, mirrored: the sprite
+# frame the PPU is told to draw is SPR_SHIP0 + heading, and that pairing is the
+# wiring half of the phase.
+ROT_STEPS = 16
+SPR_SHIP0 = 0
 
 GRAV_SPAN = 8                   # ticks between the two position samples
 GRAV_POLL = 400                 # frames to wait for the cartridge to start
+
+THRUST_SPAN = 8                 # ticks to hold the button in p4_thrust
 
 
 def parse_map(path):
@@ -148,7 +168,8 @@ class Game:
 
         return {"x": u16(SHIP_X), "y": u16(SHIP_Y),
                 "xf": b[SHIP_XF], "yf": b[SHIP_YF],
-                "vx": s16(SHIP_VX), "vy": s16(SHIP_VY)}
+                "vx": s16(SHIP_VX), "vy": s16(SHIP_VY),
+                "heading": b[SHIP_HEADING], "fuel": u16(SHIP_FUEL)}
 
     def oam(self, slot=0):
         """The raw OAM bytes for one sprite slot: y, x, tile, attrs."""
@@ -409,8 +430,143 @@ def p3_gravity(g):
                 "remainder between ticks (yf was 0 on all 4 sampled ticks)")
 
 
+# ------------------------------------------------------------------ P4 -----
+def p4_thrust(g):
+    """Thrust beats gravity while the tank lasts, and then does nothing at all.
+
+    Two things can be wrong here and neither is a screenshot.  Thrust can be a
+    MAGNITUDE without a direction -- the ship rises whichever way its nose
+    points, which looks fine until you turn it -- and the fuel can burn in
+    main.c's tick loop instead of inside sim.h's step, which reads identically
+    until a frame overruns its budget and quietly buys the player fuel.  Both
+    are asserted against the state the ROM itself is running on.
+    """
+    print("P4 thrust")
+    # A symbol this phase reads being ABSENT is an assertion failure, not a
+    # harness error: that is the power gate on P3's ROM, which has a `ship` but
+    # no heading and no fuel, and it has to answer 1, not 2.
+    if not g.need("ship"):
+        return
+
+    # The same poll p3_gravity uses: the ship is falling from the cartridge's
+    # first tick, so sample from the ROM's own loop rather than from a fixed
+    # frame count, which would catch it already most of the way down.
+    boot = 0
+    while g.u16("frame") == 0 and boot < GRAV_POLL:
+        g.run(1)
+        boot += 1
+    if not check(0 < boot < GRAV_POLL,
+                 "the ROM reached its own tick loop (frame is counting after "
+                 "%d frames)" % boot):
+        return
+
+    s = g.ship()
+    check(s["heading"] == 0 and s["fuel"] == FUEL_START,
+          "the ship spawns nose up with a full tank (heading %d, fuel %d)"
+          % (s["heading"], s["fuel"]))
+
+    # ---- held: the net vertical acceleration reverses ---------------------
+    # The heading is 0, so thrust_dy[0] is -256 and the per-tick vy change is
+    # GRAV + ((THRUST * -256) >> 8) == GRAV - THRUST.  Asserted as the exact
+    # sum over the span, so a thrust that is merely "bigger than gravity"
+    # rather than exactly THRUST fails here rather than passing on a sign.
+    k = THRUST_SPAN
+    a = g.ship()
+    g.run(k, "U")
+    b = g.ship()
+    check(b["fuel"] == a["fuel"] - FUEL_BURN * k,
+          "holding UP burns exactly %d fuel per tick (%d -> %d over %d ticks)"
+          % (FUEL_BURN, a["fuel"], b["fuel"], k))
+    check(b["vy"] - a["vy"] == (GRAV - THRUST) * k,
+          "and the net vertical acceleration has REVERSED -- vy rises by "
+          "(THRUST - GRAV) * %d == %d against gravity over those ticks "
+          "(vy %d -> %d)" % (k, (THRUST - GRAV) * k, a["vy"], b["vy"]))
+
+    # ---- released: the previous descent resumes, exactly ------------------
+    c = g.ship()
+    g.run(k)
+    d = g.ship()
+    check(d["vy"] - c["vy"] == GRAV * k,
+          "on release the previous descent resumes at exactly GRAV per tick "
+          "(%d -> %d over %d ticks)" % (c["vy"], d["vy"], k))
+    check(d["fuel"] == c["fuel"],
+          "and nothing burns with the button up (%d -> %d)"
+          % (c["fuel"], d["fuel"]))
+
+    # ---- the tank ---------------------------------------------------------
+    # One emulated frame is one tick is one burn, so this counts FRAMES -- and
+    # a step that burned fuel per RENDER rather than per tick lands somewhere
+    # else entirely the moment the frame budget slips.  Bounded, so a ROM that
+    # never burns (or a heading/fuel read out of a shorter struct) FAILS here
+    # instead of hanging the harness: a timeout would answer 2, and the gate
+    # needs 1.
+    f0 = g.ship()["fuel"]
+    spent = 0
+    while g.ship()["fuel"] and spent < FUEL_START + 200:
+        g.run(1, "U")
+        spent += 1
+    e = g.ship()
+    if not check(e["fuel"] == 0,
+                 "holding UP empties the tank (%d of %d fuel left after %d "
+                 "ticks)" % (e["fuel"], FUEL_START, spent)):
+        return
+    check(spent == (f0 + FUEL_BURN - 1) // FUEL_BURN,
+          "and it takes exactly the fuel it held: %d units at %d per tick is "
+          "%d ticks (took %d)" % (f0, FUEL_BURN,
+                                  (f0 + FUEL_BURN - 1) // FUEL_BURN, spent))
+
+    # ---- empty: the button is inert ---------------------------------------
+    # The other half of the target.  With the tank dry, holding UP changes the
+    # trajectory by NOTHING at all -- vy falls by gravity alone and vx does not
+    # move -- so the ship is committed to its descent.
+    f = g.ship()
+    g.run(k, "U")
+    h = g.ship()
+    check(h["vy"] - f["vy"] == GRAV * k and h["vx"] == f["vx"] and h["fuel"] == 0,
+          "an empty tank makes thrust inert -- %d ticks of held UP change vy "
+          "by exactly GRAV * %d == %d and leave vx at %d (vy %d -> %d)"
+          % (k, k, GRAV * k, f["vx"], f["vy"], h["vy"]))
+
+    # ---- the stick: one press, one step, and the frame follows it ---------
+    # A and B are EDGES, so they are held for several frames on purpose: an
+    # edge that fired once per frame would spin the ship through a whole
+    # revolution on one press, and holding is the only way to tell from the
+    # outside.  The heading is 0 here -- nothing above pressed A or B.
+    h0 = g.ship()["heading"]
+    g.run(4, "B")
+    h1 = g.ship()["heading"]
+    check(h1 == (h0 + 1) % ROT_STEPS,
+          "four frames of held B are ONE rotation step, not four (heading "
+          "%d -> %d)" % (h0, h1))
+
+    # One vblank of slack, and no more: set_sprite_tile writes GBDK's SHADOW
+    # OAM, which only reaches the PPU's 0xFE00 on the next vblank.  The slack
+    # is in the phase, never in the value -- a ship drawn on frame 0 whatever
+    # its heading fails here.
+    g.run(3)
+    check(g.oam()[2] == SPR_SHIP0 + h1,
+          "and the sprite frame follows the heading (heading %d draws tile "
+          "0x%02X, expected 0x%02X)" % (h1, g.oam()[2], SPR_SHIP0 + h1))
+
+    g.run(4, "A")
+    check(g.ship()["heading"] == h0,
+          "A steps the other way, back to where we started (heading %d)"
+          % g.ship()["heading"])
+
+    # A button-free tick between two presses, and it is not optional: run()
+    # holds the button for every frame it is given and releases it after the
+    # tick, so the ROM's prev_keys is still A when the next run starts and the
+    # following press is not an EDGE.  Two presses back to back would read as
+    # one and this assertion would fail on a perfectly good ROM.
+    g.run(2)
+    g.run(4, "A")
+    check(g.ship()["heading"] == (h0 - 1) % ROT_STEPS,
+          "and keeps going the other way past it, wrapping rather than "
+          "underflowing (heading %d)" % g.ship()["heading"])
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
-          ("p3_gravity", p3_gravity)]
+          ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust)]
 
 
 def main(rom, mapfile, only=None):

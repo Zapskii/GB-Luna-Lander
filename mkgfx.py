@@ -9,7 +9,13 @@ sprite tiles live.
 Every tile is drawn as ASCII - '.' = colour 0, '1' = light, '2' = dark,
 '#' = black - so there are no dependencies and `python3 mkgfx.py` runs anywhere.
 gfx.h is committed, so a plain `make` needs no Python at all.
+
+The ship's ROT_STEPS headings are the one thing not typed in by hand: they are
+rasterised from a polygon at each 22.5 degree step, so the sprite turns smoothly
+instead of being four quarter-turns of one drawing.  tools/mktab.py owns the
+matching thrust vectors, and frame i has to point where vector i points.
 """
+import math
 
 TILES = []          # TILES[i] is 16 bytes; the index IS the BG tile id
 NAMES = []          # (define name, tile id), for the generated #defines
@@ -48,12 +54,6 @@ def put(index, rows, name=None):
     DRAWN.add(index)
     if name:
         NAMES.append((name, index))
-
-
-def rot_cw(rows):
-    """Rotate an 8x8 tile a quarter turn clockwise."""
-    n = len(rows)
-    return ["".join(rows[n - 1 - x][y] for x in range(n)) for y in range(n)]
 
 
 # ------------------------------------------------------------ terrain tiles
@@ -145,22 +145,48 @@ NAMES.append(("T_LETTER0", 30))
 # 8 px left of and 16 px above the position written), so the placing lives in
 # main.c and adds both offsets.
 #
-# The four right-angle headings, one tile each, spun from the one drawing here:
-# a ship that is a table of rotations is the whole reason P4 needs no runtime
-# trigonometry, and the generator is where a rotation belongs.
-SHIP = ["...##...",
-        "..####..",
-        "..####..",
-        ".######.",
-        "########",
-        "###..###",
-        "##....##",
-        "#......#"]
+# ROT_STEPS PRE-RENDERED HEADINGS, and this is the whole reason P4 needs no
+# runtime trigonometry: the ship's heading picks one of these tiles and the
+# matching pair out of tables.h's thrust_dx/dy, and neither the renderer nor the
+# physics ever calls sin().  Hand-rotating an 8x8 ASCII drawing would alias into
+# mush at the odd angles, so the ship is a POLYGON rasterised at the eight pixel
+# centres once per step - the same shape at every heading, which is also what
+# makes the self-check below able to measure which way each frame points.
+ROT_STEPS = 16              # 22.5 deg per step; tables.h defines the same
 
-SPRITES = []
-for _ in range(4):
-    SPRITES.append(enc(SHIP))
-    SHIP = rot_cw(SHIP)
+# The triangle, in px from the tile centre: nose at SHIP_APEX along the heading,
+# back edge at SHIP_BASE behind it, that edge SHIP_BASE_HW wide to each side.
+# APEX is tuned rather than chosen -- a pointed nose has no pixel within half a
+# pixel of the tile's centre line, so the tip is drawn one pixel short and the
+# ship's ink lands half a pixel off centre; at 4.7 the tip DOES cover a pixel
+# centre and the ink spans the tile symmetrically, which is what stops the ship
+# wobbling a pixel sideways as it turns.
+SHIP_APEX = 4.7
+SHIP_BASE = -3.8
+SHIP_BASE_HW = 3.8
+
+
+def render_ship(step):
+    """One heading as 8 rows of ASCII.  Step 0 is nose-up and each step turns
+    the nose 22.5 deg clockwise -- the SAME order tables.h indexes the thrust
+    vectors in, because the frame on screen and the vector the physics uses
+    come out of one byte and a mismatch is invisible on a screenshot."""
+    th = 2.0 * math.pi * step / ROT_STEPS
+    s, c = math.sin(th), math.cos(th)
+    rows = []
+    for py in range(8):
+        row = ""
+        for px in range(8):
+            du, dv = px + 0.5 - 4.0, py + 0.5 - 4.0   # pixel centre, tile-centred
+            u = du * s - dv * c                       # along the nose
+            v = du * c + dv * s                       # to the nose's right
+            hw = SHIP_BASE_HW * (SHIP_APEX - u) / (SHIP_APEX - SHIP_BASE)
+            row += "#" if (SHIP_BASE <= u <= SHIP_APEX and -hw <= v <= hw) else "."
+        rows.append(row)
+    return rows
+
+
+SPRITES = [enc(render_ship(h)) for h in range(ROT_STEPS)]
 
 # ------------------------------------------------------------- self-check
 TILE_IDS = sorted(DRAWN)
@@ -168,7 +194,34 @@ assert len(TILES) == 56, "expected 56 tile ids, got %d" % len(TILES)
 assert TILE_IDS == [0, 1, 2, 19] + list(range(20, 56)), (
     "unaccounted tile ids: %r" % (sorted(set(range(56)) - DRAWN - set(GAP))))
 assert max(TILE_IDS) < 128, "tile id %d >= 128 reads the sprite bank" % max(TILE_IDS)
-assert len(SPRITES) == 4, "expected four ship headings, got %d" % len(SPRITES)
+
+# The ship headings.  Two things can be wrong here and both are invisible on a
+# screenshot: a "rotation" that stopped rotating (sixteen copies of one frame),
+# and a frame rendered at a different angle than the thrust vector tables.h
+# gives the same index -- which thrusts the ship sideways while it looks right.
+assert len(SPRITES) == ROT_STEPS, \
+    "expected %d ship headings, got %d" % (ROT_STEPS, len(SPRITES))
+assert len(set(tuple(s) for s in SPRITES)) == ROT_STEPS, \
+    "the ship headings are not all distinct -- some step renders a repeat"
+for h in range(ROT_STEPS):
+    rows = render_ship(h)
+    ink = [(x, y) for y in range(8) for x in range(8) if rows[y][x] == "#"]
+    assert ink, "heading %d renders nothing" % h
+    # Which way the frame ACTUALLY points, read off the pixels rather than taken
+    # on trust from the step it was rendered at.  The ship is a triangle: its
+    # mass sits behind the nose, so the ink's centroid is displaced AWAY from
+    # the heading.  Measured along the heading that is cos = -1; measured across
+    # it, 0; measured the wrong way round, +1.
+    cx = sum(p[0] for p in ink) / len(ink) - 3.5
+    cy = sum(p[1] for p in ink) / len(ink) - 3.5
+    a = 2.0 * math.pi * h / ROT_STEPS
+    cos_back = (cx * math.sin(a) + cy * -math.cos(a)) / math.hypot(cx, cy)
+    # -0.95 rather than -1: the measured values sit at -0.999 or tighter, and
+    # the slack is for art tweaks.  What it rejects is a whole step or more --
+    # 22.5 deg off reads -0.92 -- which is the size of error the frame/vector
+    # pairing can actually have.
+    assert cos_back < -0.95, \
+        "heading %d does not point where it says (centroid cos %.2f)" % (h, cos_back)
 
 # ----------------------------------------------------------------- output
 lines = [
@@ -187,10 +240,13 @@ for name, val in NAMES:
     lines.append("#define %-15s %d" % (name, val))
 lines += [
     "",
-    "/* Two OAM slots' worth of sprite tiles: the ship in four right-angle",
-    " * headings, spun by the generator from one drawing.  Colour 0 is a HOLE on",
-    " * a sprite, so the ship's background is transparent here - which is why",
-    " * sprites are a second array and not a slice of gfx_tiles. */",
+    "/* The ship, one tile per heading: sprite tile SPR_SHIP0 + heading, and the",
+    " * heading is also the index into tables.h's thrust_dx/dy.  ROT_STEPS (16)",
+    " * headings at 22.5 deg, pre-rendered here so nothing rotates at runtime --",
+    " * sprite frame i and thrust vector i point the same way, which is the whole",
+    " * pairing.  Colour 0 is a HOLE on a sprite, so the ship's background is",
+    " * transparent here - which is why sprites are a second array and not a",
+    " * slice of gfx_tiles. */",
     "#define GFX_SPRITE_COUNT %d" % len(SPRITES),
     "#define SPR_SHIP0 %d" % 0,
     "",

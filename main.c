@@ -22,6 +22,13 @@
  * being told.  P3 has no camera and no wrap -- the ship falls off the bottom
  * of a 144 px screen and keeps counting, because a landing verdict is P5's and
  * collision is P4's.
+ *
+ * P4 hands the ship a pilot.  This file's whole share of that is the JOYPAD
+ * DECODE -- held keys into sim.h's SHIP_THRUST, edges into SHIP_ROT_L/R -- and
+ * one sprite tile picked from the heading byte.  The rotation, the thrust
+ * vector, the burn and the gravity all live in sim.h so tests/test_sim.c can
+ * run them without an emulator; what is left here is the wiring, which is
+ * exactly the half that probe.p4_thrust covers and the host cannot see.
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -29,6 +36,12 @@
 #include "gfx.h"
 #include "sim.h"
 #include "terrain.h"
+
+/* Heading selects sprite tile SPR_SHIP0 + heading, and sim.h masks it to
+ * 0..ROT_STEPS-1.  If the sprite bank ever held fewer tiles than there are
+ * headings that index runs off the end of gfx_sprites[] into whatever follows
+ * it and the ship draws as garbage; a build error beats that. */
+typedef char ship_frames_fit[(ROT_STEPS <= GFX_SPRITE_COUNT) ? 1 : -1];
 
 /* The BG tilemap.  The PPU's is 32x32 regardless of what the 20x18 window
  * shows, and P2 blanks all of it: a later scroll brings in sky, not whatever
@@ -46,9 +59,15 @@
  * the budget halves the game and shows up here as frame advancing 0, not 1. */
 static uint16_t frame;
 
-/* This tick's joypad poll.  Nothing branches on it yet; P4/P6 read it (and
- * `pressed`, which is `keys & ~prev_keys`). */
-static uint8_t keys;
+/* This tick's joypad poll, the one before it, and the edge between them.
+ *
+ * `pressed` is `keys & ~prev_keys`, and the split matters: START/A/B are
+ * ONE-SHOTS and read `pressed`, so holding B steps the heading once instead of
+ * spinning the ship a whole revolution, while thrust reads `keys` so a held
+ * button keeps burning fuel.  GBDK's joypad() is a raw read of the current
+ * state -- it does not do this for you -- so `prev_keys` has to be in main.c's
+ * storage, next to `keys`, and nowhere else. */
+static uint8_t keys, prev_keys, pressed;
 
 /* The family's VRAM lock, as a value tools/probe.py can read back.
  *
@@ -69,8 +88,9 @@ static uint8_t lcdc_at_load;
  *
  * Spawn is the top of the screen, mid-world -- LANDER's world is exactly one
  * 160 px screen wide, so world x and screen x are the same number and 80 IS
- * the middle.  From rest: no thrust, no rotation, nothing to press. */
-static Ship ship = { 80, 16, 0, 0, 0, 0 };
+ * the middle.  From rest, nose up (heading 0, the frame mkgfx.py renders at
+ * 22.5 * 0 degrees), with a full tank. */
+static Ship ship = { 80, 16, 0, 0, 0, 0, 0, FUEL_START };
 
 /* Blit the level surface into the BG tilemap: one tilemap column per world
  * column.  There is no camera yet, so world column N IS screen column N and the
@@ -101,16 +121,27 @@ static void draw_terrain(void)
     }
 }
 
-/* Put the sprite where the ship is -- called at boot and once per tick, always
- * straight from the state so the offset is written down exactly once.  The
- * ship's top-left is (x, y); the OAM bytes are (x + 8, y + 16). */
+/* Put the sprite where the ship is and at the heading it is pointing -- called
+ * at boot and once per tick, always straight from the state so the offset is
+ * written down exactly once.  The ship's top-left is (x, y); the OAM bytes are
+ * (x + 8, y + 16).
+ *
+ * The FRAME comes out of the same heading byte the thrust VECTOR does, so the
+ * nose on screen is always the direction the physics is accelerating: a
+ * renderer that tracked its own frame would look right while thrusting
+ * sideways, and nothing on screen would say so. */
 static void ship_draw(void)
 {
+    set_sprite_tile(SPR_SHIP0, (uint8_t)(SPR_SHIP0 + ship.heading));
     move_sprite(SPR_SHIP0, (uint8_t)(ship.x + 8), (uint8_t)(ship.y + 16));
 }
 
 void main(void)
 {
+    /* This tick's decoded pad.  Declared here rather than in the loop because
+     * SDCC wants declarations at the top of a block. */
+    uint8_t input;
+
     DISPLAY_OFF;
 
     /* set_bkg_data/set_sprite_data take a tile COUNT, not a last id: passing 0
@@ -129,8 +160,6 @@ void main(void)
      * display went on at any point before this line, bit 7 is set here.  It has
      * to come after draw_terrain(), which is the last thing that touches VRAM. */
     lcdc_at_load = LCDC_REG;
-
-    set_sprite_tile(SPR_SHIP0, SPR_SHIP0);      /* heading 0: level flight */
 
     /* OAM is not screen space: the PPU draws an 8x8 sprite with its top-left at
      * (OAM_x - 8, OAM_y - 16).  move_sprite() writes the raw bytes and does NOT
@@ -156,11 +185,28 @@ void main(void)
     while (1) {
         keys = joypad();
 
+        /* The edge, taken here and stored: `pressed` is what is down now that
+         * was not down last tick.  Recomputing it anywhere else -- or keeping
+         * it in a local -- would lose it across the wait_vbl_done() below. */
+        pressed = (uint8_t)(keys & ~prev_keys);
+        prev_keys = keys;
+
+        /* Decode the pad into sim.h's flags.  UP is thrust (held: `keys`), A
+         * and B are the two rotation steps (one-shot: `pressed`) -- A turns
+         * the nose one step anticlockwise and B clockwise, so they undo each
+         * other exactly.  This is the whole of main.c's share of P4; sim.h
+         * does everything that follows from it. */
+        input = 0;
+        if (keys & J_UP)    input |= SHIP_THRUST;
+        if (pressed & J_A)  input |= SHIP_ROT_L;
+        if (pressed & J_B)  input |= SHIP_ROT_R;
+
         /* One iteration IS one tick.  Physics runs once here, unpaced by any
          * dt accumulator, because wait_vbl_done() below already puts the loop
          * at one iteration per ~16.7 ms frame -- adding one would run the
-         * physics twice as fast as the wall clock on every machine. */
-        ship_step(&ship);
+         * physics twice as fast as the wall clock on every machine, and would
+         * burn the tank twice as fast with it. */
+        ship_step(&ship, input);
 
         /* Drawn from the state, every tick.  A renderer that kept its own copy
          * of the position would drift from the physics and nothing on screen
