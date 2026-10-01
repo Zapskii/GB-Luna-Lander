@@ -36,6 +36,7 @@ KEYS = {"R": "right", "L": "left", "U": "up", "D": "down",
 
 # --- layout constants, straight out of main.c / mkgfx.py --------------------
 MAP0 = 0x9800                   # the BG tilemap: 32x32 bytes, one per tile
+WIN0 = 0x9C00                   # the WINDOW tilemap, the second 32x32 map
 MAP_W = MAP_H = 32
 VIEW_W, VIEW_H = 20, 18         # what SCX/SCY = 0 puts on the screen
 LCDC = 0xFF40
@@ -91,23 +92,46 @@ PAD_ROW = {1: 12, 2: 9}         # multiplier -> the surface row that pad sits at
 MAP_TILES = 32
 
 # P10's camera, mirrored for the same reason.  VIEW_H_PX is sim.h's SCREEN_H_PX
-# -- the panel is 144 px and it is the number the camera's bottom clamp
-# subtracts; CAM_ANCHOR is how far up the screen the camera holds the ship, a
-# third of it.  `world_h` is NOT mirrored here: it is read out of the ROM's own
-# map, because the point of that symbol is that main.c derives it from the
-# profile rather than from a constant somebody could forget to change.
+# -- the panel is 144 px -- and CAM_ANCHOR is how far up the screen the camera
+# holds the ship, a third of it.  What the bottom clamp SUBTRACTS is not the
+# panel but PLAY_H_PX, the band above P12's status bar; see the block below.
+# `world_h` is NOT mirrored here: it is read out of the ROM's own map, because
+# the point of that symbol is that main.c derives it from the profile rather
+# than from a constant somebody could forget to change.
 VIEW_H_PX = VIEW_H * 8
 CAM_ANCHOR = VIEW_H_PX // 3
+
+# P12's STATUS BAR, and the visible height it costs the world.  The panel is
+# 144 px and the telemetry is the WINDOW layer's now: the window runs to the
+# bottom-right corner from WY, so its two rows COVER the last two rows of
+# background and the player sees PLAY_H_PX of world.  sim.h's camera clamps on
+# THAT and not on the panel -- a clamp two rows too generous leaves the ground at
+# the end of a descent scrolled under the bar and never seen.
+#
+# Mirrored here rather than derived from the ROM for the same reason the tile
+# ids are: a probe that asked the ROM what its own camera bounds were could not
+# tell a camera clamped on the wrong one from a correct one.
+HUD_H = 2                       # the rows the status bar owns, at the BOTTOM
+PLAY_H = VIEW_H - HUD_H
+PLAY_H_PX = PLAY_H * 8
+HUD_BAR0, HUD_BAR1 = PLAY_H * 8, PLAY_H * 8 + 8        # those rows, in SCREEN px
 
 # main.c's screen state and its HUD layout, mirrored for the same reason the
 # tile ids are.  Where a number SITS is part of the HUD, not a detail of it: a
 # HUD that drew the right tank in the wrong row of the map is a bug, and this is
 # the file that has to be able to see it, so the layout is written down here
 # rather than derived from the ROM.
+#
+# THE ROWS ARE WINDOW ROWS as of P12: HUD_ROW 0 is the window's first row, which
+# is screen row PLAY_H.  Every read below therefore goes through the WINDOW map
+# and not the BG one -- the same tile id at the same (x, y) means two different
+# things in the two maps, which is exactly the confusion this phase is about.
 ST_TITLE, ST_PLAY = 0, 1
-HUD_H = 2                       # the rows the HUD owns at the top of the field
 HUD_FUEL_ROW, HUD_FUEL_COL, HUD_FUEL_W = 0, 5, 3
 HUD_ALT_ROW, HUD_ALT_COL, HUD_ALT_W = 0, 13, 3
+# The target-pad indicator, on the velocity row: "PAD X" then the multiplier
+# sim.h's pad_mult() gives the column under the ship, one digit wide.
+HUD_PAD_ROW, HUD_PAD_COL, HUD_PAD_W = 1, 19, 1
 # Where the verdict lands in the strip once the life is over: the row the
 # velocities are on, which is the row the outcome replaces.
 HUD_VERDICT_ROW, HUD_VERDICT_COL = 1, 8
@@ -115,7 +139,7 @@ HUD_VERDICT_ROW, HUD_VERDICT_COL = 1, 8
 # and every other character is the tile the layout puts there.  Written out
 # because the row is what a leftover from the last verdict shows up in, and a
 # leftover is invisible to a string search -- see the check below.
-HUD_VEL_ROW = "VX ddd VY ddd" + " " * (VIEW_W - 13)
+HUD_VEL_ROW = "VX ddd VY ddd " + "PAD Xd"
 
 FRAMES = 120                    # how long the tick-rate assertion runs
 
@@ -345,35 +369,58 @@ class Game:
         """The raw OAM bytes for one sprite slot: y, x, tile, attrs."""
         return list(self.p.memory[OAM + 4 * slot:OAM + 4 * slot + 4])
 
-    def tile(self, x, y):
-        return self.p.memory[MAP0 + y * MAP_W + x]
+    def tile(self, x, y, base=MAP0):
+        """One tile id out of a tilemap.  WHICH map is a parameter and not a
+        constant as of P12: the BG map holds terrain and the WINDOW map holds
+        the status bar, and the same (x, y) means two different things in the
+        two.  Reading the HUD out of the BG map is the exact confusion this
+        phase exists to settle, so the map is always named at the call."""
+        return self.p.memory[base + y * MAP_W + x]
 
-    def find_text(self, s):
+    def find_text(self, s, base=MAP0):
         """Every (row, col) where the tilemap spells `s`, through this file's
         own copy of the font ids.  An empty list is "the string is not on the
         screen", which is what a title that was never drawn answers."""
         want = [glyph(c) for c in s]
         hits = []
         for y in range(VIEW_H):
-            row = [self.tile(x, y) for x in range(MAP_W)]
+            row = [self.tile(x, y, base) for x in range(MAP_W)]
             for x in range(MAP_W - len(want) + 1):
                 if row[x:x + len(want)] == want:
                     hits.append((y, x))
         return hits
 
-    def hud_num(self, row, col, w):
-        """The number in the `w` digit tiles at (col,row), or None if they are
-        not all digits -- a blank, a letter or a tile from an unloaded bank.
-        Read off the SCREEN rather than out of main.c's `bg`, which is the
-        whole point: it is what the PPU was told, after the tile ids went
-        through the font."""
+    def hud_num(self, row, col, w, base=WIN0):
+        """The number in the `w` digit tiles at (col,row) of a tilemap, or None
+        if they are not all digits -- a blank, a letter or a tile from an
+        unloaded bank.  Read off the TILEMAP rather than out of main.c's `bg`,
+        which is the whole point: it is what the PPU was told, after the tile
+        ids went through the font.  The HUD's own map is the WINDOW's as of
+        P12, so that is the default."""
         v = 0
         for i in range(w):
-            t = self.tile(col + i, row)
+            t = self.tile(col + i, row, base)
             if not T_DIGIT0 <= t < T_DIGIT0 + 10:
                 return None
             v = v * 10 + (t - T_DIGIT0)
         return v
+
+    def scanline(self, row):
+        """One row of the FRAMEBUFFER, as a list of RGBA tuples.
+
+        The only reader here that asks what the PPU DREW rather than what it was
+        told to draw, and P12 needs it because the defect is precisely a
+        disagreement between the two: `tile()` addresses MAP coordinates, and
+        "the status bar's two rows are the top of the screen" is a claim about
+        SCREEN coordinates that no tilemap read can make.  PyBoy hands back the
+        finished 160x144 image, so this is the player's view.
+        """
+        return [tuple(int(v) for v in px) for px in self.p.screen.ndarray[row]]
+
+    def pixels(self, row, x0, x1):
+        """The bytes of a horizontal SLICE of a framebuffer row, for comparing
+        one frame's bar against another's."""
+        return bytes(bytearray(self.p.screen.ndarray[row, x0:x1].reshape(-1)))
 
     def lcdc(self):
         return self.p.memory[LCDC]
@@ -466,13 +513,14 @@ def p1_boot(g):
     # other check does is that the generated id reached the map at all.  P2
     # owns the layout now (see p2_terrain); this keeps the boot-level claim.
     #
-    # The top two rows are the HUD as of P6, so the region this reads is below
-    # them: the HUD is a strip of font tiles over sky, and a check that called
-    # those "a tile from an unloaded bank" would be describing the HUD, not the
-    # terrain.
+    # The WHOLE of the BG map's visible rows, and it is the whole of them as of
+    # P12: P6's HUD was two rows of BG MAP over the top of this, so the region
+    # read had to stop below them or it would have been describing the HUD and
+    # not the terrain.  The telemetry is the WINDOW layer's now and the BG map is
+    # terrain from row 0 down, so the skip is gone with the reason for it.
     seen = set()
     ground = 0
-    for y in range(HUD_H, VIEW_H):
+    for y in range(VIEW_H):
         for x in range(VIEW_W):
             t = g.tile(x, y)
             seen.add(t)
@@ -484,7 +532,7 @@ def p1_boot(g):
           "unloaded bank (%r is on screen)" % extra)
     check(ground >= VIEW_W,
           "and the generated ground is really drawn (%d of %d cells, at least "
-          "one surface tile per column)" % (ground, VIEW_W * (VIEW_H - HUD_H)))
+          "one surface tile per column)" % (ground, VIEW_W * VIEW_H))
 
 
 # ------------------------------------------------------------------ P2 -----
@@ -522,14 +570,14 @@ def p2_terrain(g):
           "every column's surface tile is at its terrain[] row -- col:row:found "
           "%r" % bad[:5])
 
-    # ...and the rest of the column follows from it: sky above, body below.
-    # Starts BELOW the HUD strip, which P6 draws over the top two rows of every
-    # column.  Those rows are sky in all of them (the highest surface row is 9,
-    # well under the strip), so this skips text rather than terrain: the rows
-    # the surface can actually reach are all still checked, in every column.
+    # ...and the rest of the column follows from it: sky above, body below.  The
+    # WHOLE column as of P12 -- P6's HUD used to sit over the top two rows of
+    # every column and the loop had to start below it, and the telemetry is the
+    # WINDOW layer's now, so the BG map is terrain the whole way down and there
+    # is nothing left for the skip to be protecting.
     bad = []
     for x in range(WORLD_COLS):
-        for y in range(HUD_H, VIEW_H):
+        for y in range(VIEW_H):
             want = (T_BLANK if y < h[x] else
                     T_TERRAIN_TOP if y == h[x] else T_TERRAIN)
             if g.tile(x, y) != want:
@@ -996,8 +1044,13 @@ def p6_hud(g):
           g.find_text("PRESS START") == [],
           "and the title's text is gone from the screen (%r, %r)"
           % (g.find_text("LUNA LANDEER"), g.find_text("PRESS START")))
-    check(bool(g.find_text("FUEL")),
-          "the HUD takes its place (%r)" % (g.find_text("FUEL"),))
+    # ...and the telemetry is in the WINDOW map, which is where P12 puts it.  The
+    # string has to be looked for THERE and not in the BG map: the two maps are
+    # 32x32 each and the same (x, y) in both is a different cell, so a "FUEL"
+    # found at BG row 0 would be the title's leftovers and not the HUD at all.
+    check(bool(g.find_text("FUEL", WIN0)),
+          "the HUD takes its place, in the WINDOW map (%r)"
+          % (g.find_text("FUEL", WIN0),))
 
     # ---- the fuel counts down as fuel burns -------------------------------
     a = g.ship()
@@ -1055,9 +1108,9 @@ def p6_hud(g):
     # that follow -- the same one-vblank lag the numbers above are allowed.
     g.run(2)
     s = g.ship()
-    check(s["state"] == ST_CRASH and bool(g.find_text("CRASHED")),
+    check(s["state"] == ST_CRASH and bool(g.find_text("CRASHED", WIN0)),
           "a hard drop ends the life, and the HUD says so (state %d after %d "
-          "ticks, %r)" % (s["state"], ticks, g.find_text("CRASHED")))
+          "ticks, %r)" % (s["state"], ticks, g.find_text("CRASHED", WIN0)))
 
     # ---- a restart over a crashed life ------------------------------------
     # Where a HUD that wrote only the tiles it needed would leave its tracks.
@@ -1071,7 +1124,7 @@ def p6_hud(g):
     g.run(2)
     bad = []
     for x, c in enumerate(HUD_VEL_ROW):
-        t = g.tile(x, HUD_VERDICT_ROW)
+        t = g.tile(x, HUD_VERDICT_ROW, WIN0)
         if c == "d":
             if not T_DIGIT0 <= t < T_DIGIT0 + 10:
                 bad.append((x, "a digit", t))
@@ -1093,11 +1146,11 @@ def p6_hud(g):
     g.run(2)
     s = g.ship()
     shown = g.hud_num(HUD_VERDICT_ROW, HUD_VERDICT_COL, 1)
-    check(s["state"] == ST_LANDED and bool(g.find_text("LANDED X")) and
+    check(s["state"] == ST_LANDED and bool(g.find_text("LANDED X", WIN0)) and
           shown == s["mult"] == 2,
           "and a controlled descent lands and the HUD scores it -- state %d "
           "after %d ticks, showing %r, scored %d, %r"
-          % (s["state"], ticks, shown, s["mult"], g.find_text("LANDED X")))
+          % (s["state"], ticks, shown, s["mult"], g.find_text("LANDED X", WIN0)))
 
     # ---- the frame keeps its rate ----------------------------------------
     # The tick loop draws now -- a 40-tile HUD blitted on every iteration
@@ -1325,10 +1378,12 @@ def p9_window(g):
           "col:profile-row:screen-row:found %r" % (top, bad[:5]))
 
     # ...and the rest of the window is sky above it and body below it, so a ring
-    # that painted the surface and left the row alone fails too.
+    # that painted the surface and left the row alone fails too.  Rows 0 and 1
+    # are terrain as of P12 -- the telemetry moved to the WINDOW layer -- so the
+    # loop no longer starts below them.
     bad = []
     for x in range(WORLD_COLS):
-        for y in range(HUD_H, VIEW_H):
+        for y in range(VIEW_H):
             wr = top + y
             want = (T_BLANK if wr < descent[x] else
                     T_TERRAIN_TOP if wr == descent[x] else T_TERRAIN)
@@ -1420,12 +1475,16 @@ def p10_camera(g):
     # ---- the ROM's own geometry ------------------------------------------
     descent = g.profile("terrain_descent")
     world_h = (max(descent) + 1) * 8        # the deepest column, +1 tile of ground
-    cam_max = world_h - VIEW_H_PX
-    check(g.u16("world_h") == world_h and world_h > VIEW_H_PX,
+    # The bound is on what is VISIBLE and not on the panel: P12's status bar is a
+    # WINDOW at the bottom of the screen and covers the last HUD_H rows, so the
+    # camera must stop PLAY_H_PX above the world's end.  A bound taken on the
+    # panel is 16 px too generous, and those 16 px are the ground.  See p12_mode.
+    cam_max = world_h - PLAY_H_PX
+    check(g.u16("world_h") == world_h and world_h > PLAY_H_PX,
           "the ROM takes the world's height from the profile it is drawing, so "
           "the clamp and the tiles cannot be about two worlds -- %d px from "
-          "DESCENT's deepest row %d, against the screen's %d"
-          % (g.u16("world_h"), max(descent), VIEW_H_PX))
+          "DESCENT's deepest row %d, against the visible band's %d"
+          % (g.u16("world_h"), max(descent), PLAY_H_PX))
 
     # ---- the camera, tick by tick ----------------------------------------
     # Every sample against the rule, written out here rather than imported from
@@ -1601,11 +1660,12 @@ def p11_stream(g):
         separately below; what is checked HERE is the ring, and it is checked
         against the thing that wrote it.
 
-        Rows HUD_H.. are the window minus the HUD's own two rows, which are
-        telemetry and not terrain and are checked by p6_hud."""
+        EVERY visible row, as of P12, and not just the ones below the HUD: the
+        telemetry is the WINDOW layer's now, so the BG map holds terrain from
+        row 0 down and there is no longer a strip in it for p6_hud to own."""
         top = cam >> 3
         out = []
-        for r in range(HUD_H, VIEW_H):
+        for r in range(VIEW_H):
             wr = top + r
             mr = wr & (MAP_TILES - 1)
             for c in range(WORLD_COLS):
@@ -1733,11 +1793,239 @@ def p11_stream(g):
           "%r)" % (climbed, checked, bad[:3]))
 
 
+# ----------------------------------------------------------------- P12 -----
+# The status bar's STATIC cells, as framebuffer pixel slices: the label glyphs
+# and the gaps around them, and NO cell that carries a number.  A bar that is
+# scrolled by the world, or one that is not there at all, is exactly a bar whose
+# label cells move or go blank -- so these slices are what p12_mode compares
+# frame to frame and what it looks for ink in.  Written out from the layout
+# main.c builds ("FUEL ddd ALT ddd" / "VX ddd VY ddd PAD Xd") rather than derived
+# from the ROM, for the same reason HUD_VEL_ROW is.
+#
+# They all start at x >= 8 on purpose: the window is drawn from x = WX - 7 and
+# WX is 7, and which side of that boundary an emulator puts the first column is
+# not something this check should be deciding.
+HUD_LABELS = ((HUD_BAR0, 8, 40), (HUD_BAR0, 64, 104),
+              (HUD_BAR1, 8, 16), (HUD_BAR1, 48, 80), (HUD_BAR1, 104, 152))
+
+
+def p12_mode(g):
+    """Two modes off the title, and a status bar that stays put while the world
+    scrolls under it.
+
+    FOUR THINGS, and each of them is checked where it is observable:
+
+    THE BOOT DEFAULT IS READ RAW -- no keypress at all.  Which mode the ROM
+    opens on is a claim about ONE initialiser, and a check that pressed START
+    first would be reading the hand-over, where main.c re-derives the profile and
+    the world's height from `pick` and would therefore agree with any mode at
+    all.  So the title's mode line, the profile `terrain` points at and the world
+    `world_h` measures are all read before a button is touched, and all three
+    have to name the same mode.
+
+    START REALLY OPENS THE MODE THE TITLE NAMED.  The trap is a `pick` that
+    selects the terrain pointer but not the camera's world (or the other way
+    round): LANDER physics over DESCENT terrain plays perfectly plausibly and is
+    wrong, so both are asserted together, and they are asserted against the
+    generator's own profiles -- not against each other, which a ROM with one
+    profile would pass.
+
+    THE STATUS BAR IS AT THE BOTTOM OF THE SCREEN AND DOES NOT MOVE, and it is
+    read off the FRAMEBUFFER.  `Game.tile()` addresses MAP coordinates: a HUD read
+    out of the BG map at rows 0-1 is the wrong two rows of a different map, and
+    the whole defect this phase fixes is the mapping between map row and screen
+    row.  So the assertion is about screen pixels, and it is two-sided:
+
+      * every sampled frame, both bar rows MIX ink and paper -- which is what a
+        row of glyphs does and what neither the sky nor a solid ground tile does;
+      * every sampled frame, the bar's LABEL cells hold the same pixels they held
+        on the first one.  The terrain under a BG strip is dragged along by SCY,
+        so a bar that lived in the world fails this on the first frame the camera
+        moves, and in DESCENT the camera moves on nearly all of them.
+
+    AND THE CAMERA CLAMPS ON WHAT IS VISIBLE.  The window always runs to the
+    bottom-right corner, so the bar covers the last HUD_H rows of background: a
+    clamp taken on the panel's 144 px stops the view 16 px short of the world, and
+    those 16 px are the ground of a DESCENT.  The descent below is long enough to
+    reach the bound, and both the clamp and the row it leaves visible are read
+    back.
+
+    No claim is made about how any of it LOOKS beyond that: "the bar is legible"
+    is an eye's, and this file never had one.
+    """
+    print("P12 mode")
+    # A symbol this phase depends on being ABSENT is an assertion failure, not a
+    # harness error: on the P11 ROM `world_h` and `cam` are there but the bar is
+    # two rows of BG MAP, so this answers 1 on the CONTENT -- see the framebuffer
+    # half -- and the name list is here so that a genuinely older ROM exits 1
+    # rather than raising.
+    have = g.need("game", "pick", "terrain", "terrain_lander", "terrain_descent",
+                  "world_h", "ship", "cam")
+
+    lander = g.profile("terrain_lander")
+    descent = g.profile("terrain_descent")
+    lander_h = (max(lander) + 1) * 8
+    descent_h = (max(descent) + 1) * 8
+    check(lander != descent and descent_h > lander_h and
+          len(lander) == len(descent) == WORLD_COLS,
+          "the two profiles are two different worlds -- LANDER %d px deep "
+          "against DESCENT %d px, over the same %d columns"
+          % (lander_h, descent_h, WORLD_COLS))
+
+    # ---- the boot default, with nothing pressed ---------------------------
+    g.run(150)
+    check(g.var("game") == ST_TITLE,
+          "the ROM boots on the title and stays there with no hand on it "
+          "(game %d)" % g.var("game"))
+    check(g.var("pick") == 0 and bool(g.find_text("MODE LANDER")) and
+          not g.find_text("MODE DESCENT"),
+          "and the mode it boots on is the one it advertises -- LANDER (pick "
+          "%d, mode line %r)" % (g.var("pick"), g.find_text("MODE LANDER")))
+    if not have:
+        return
+    # The whole of "a single `pick` initialiser is the boot default": the mode
+    # byte, the profile the renderer and sim.h's collision read, and the world
+    # the camera is clamped against are one answer from the first tick and not
+    # only from the hand-over.  A `pick` that were initialised to DESCENT while
+    # `terrain` kept terrain.h's own initialiser fails HERE, and nowhere later --
+    # which is the bug a `start()` helper would have masked.
+    check(g.u16("terrain") == g.addr["terrain_lander"] and
+          g.u16("world_h") == lander_h and g.u16("cam") == 0,
+          "and the world the ROM is running on is that mode's, before any button "
+          "is pressed -- terrain %r -> 0x%04X, world_h %d, cam %d"
+          % (g.active_profile() == lander, g.u16("terrain"), g.u16("world_h"),
+             g.u16("cam")))
+
+    # ---- SELECT names the other one ---------------------------------------
+    g.run(4, "T")                       # an EDGE: held, it flips once
+    g.run(2)                           # button-free, so the next press is one too
+    check(g.var("pick") == 1 and bool(g.find_text("MODE DESCENT")) and
+          not g.find_text("MODE LANDER"),
+          "SELECT moves the title to DESCENT and the mode line with it (pick %d, "
+          "%r)" % (g.var("pick"), g.find_text("MODE DESCENT")))
+
+    # ---- and START opens the mode that was named --------------------------
+    g.run(8, "S")
+    g.run(4)                           # ...and the ring's first fill lands
+    check(g.u16("terrain") == g.addr["terrain_descent"] and
+          g.active_profile() == descent,
+          "START hands over the DESCENT half the title was offering -- the one "
+          "`terrain` symbol now points at 0x%04X, which is terrain_descent at "
+          "0x%04X (%r)"
+          % (g.u16("terrain"), g.addr["terrain_descent"], g.active_profile()))
+    check(g.u16("world_h") == descent_h,
+          "and the camera's world went with the tiles -- world_h %d px, the "
+          "deepest column of the profile the renderer is drawing, against "
+          "LANDER's %d (a camera still clamped on the short world would never "
+          "scroll)" % (g.u16("world_h"), lander_h))
+
+    # ---- the status bar, off the FRAMEBUFFER ------------------------------
+    # Sampled every few ticks across the whole descent, and the flight reaches
+    # the ground: the first third of it has NOTHING but sky in the world the
+    # camera is over, so a bar that came from there would be blank on those
+    # frames and the last third has ground, which scrolls.  Both are caught.
+    flat = 0                           # frames where a bar row was one colour
+    moved = 0                          # frames where the labels were not home
+    ref = None
+    cams = set()
+    ticks = 0
+    while g.ship()["state"] == ST_FLY and ticks < DESCENT_LIMIT:
+        g.run(1)
+        ticks += 1
+        cams.add(g.u16("cam"))
+        if ticks % 5:
+            continue
+        for r in (HUD_BAR0, HUD_BAR1):
+            if len(set(g.scanline(r))) < 2:
+                flat += 1
+        block = b"".join(g.pixels(r, x0, x1) for (r, x0, x1) in HUD_LABELS)
+        if ref is None:
+            ref = block
+        elif block != ref:
+            moved += 1
+    check(g.ship()["state"] != ST_FLY and ticks > 8,
+          "the scripted descent flew into the ground in %d ticks over %d camera "
+          "positions, so the samples below span a scrolled world"
+          % (ticks, len(cams)))
+    check(len(cams) > 8,
+          "and the camera really did scroll under the bar -- %d distinct cam "
+          "values, %d -> %d px" % (len(cams), min(cams), max(cams)))
+    check(flat == 0,
+          "the status bar's two rows MIX ink and paper on every sampled frame of "
+          "the descent -- glyphs and not the blank sky the camera was over (%d "
+          "sampled rows were a single colour)" % flat)
+    check(moved == 0 and ref is not None,
+          "and the bar's label cells are the SAME PIXELS on every one of them, "
+          "so the bar is not being dragged along by SCY -- a BG strip's screen y "
+          "is map_row * 8 - SCY and it is home only while cam %% 8 == 0 (%d "
+          "sampled frames had moved)" % moved)
+
+    # ---- the clamp is on what is VISIBLE, not on the panel ----------------
+    # The camera stops PLAY_H_PX above the world's end, 16 px past where a clamp
+    # on the panel's 144 would have stopped.  The gap is the whole of the ripple
+    # this phase carries: those 16 px are the ground of a descent, and a view
+    # clamped on the panel scrolls them under the status bar and never shows them
+    # while every frame on the way down looks like a working camera.
+    cam_max = descent_h - PLAY_H_PX
+    check(g.u16("cam") == cam_max and cam_max == descent_h - VIEW_H_PX + 16,
+          "and the camera came to rest at %d -- the world's end less the VISIBLE "
+          "band, %d px and not the panel's %d, which would have stopped the view "
+          "with the ground still under the bar (cam %d)"
+          % (cam_max, descent_h - PLAY_H_PX, descent_h - VIEW_H_PX,
+             g.u16("cam")))
+
+    # ---- the other mode, on its own cartridge -----------------------------
+    # The title hands over ONCE -- there is no way back to it -- so the second
+    # mode needs a second cartridge.  LANDER is the boot default, which is also
+    # the mode this check opened on, but it is reached HERE without a SELECT: the
+    # two runs share nothing but the ROM, and a `pick` that leaked between them
+    # would show up as the wrong profile below.
+    g2 = Game(g.rom, g.mapfile)
+    try:
+        g2.run(150)
+        g2.run(8, "S")
+        g2.run(2)
+        check(g2.u16("terrain") == g2.addr["terrain_lander"] and
+              g2.u16("world_h") == lander_h and g2.u16("cam") == 0 and
+              g2.var("pick") == 0,
+              "and the boot default is the OTHER world -- START with no SELECT "
+              "opens LANDER, the 104 px one, with the camera pinned at 0 (terrain "
+              "0x%04X, world_h %d, cam %d)"
+              % (g2.u16("terrain"), g2.u16("world_h"), g2.u16("cam")))
+
+        l_flat = 0
+        l_ref = None
+        l_moved = 0
+        for _ in range(16):
+            g2.run(1)
+            if g2.ship()["state"] != ST_FLY:
+                break
+            for r in (HUD_BAR0, HUD_BAR1):
+                if len(set(g2.scanline(r))) < 2:
+                    l_flat += 1
+            block = b"".join(g2.pixels(r, x0, x1) for (r, x0, x1) in HUD_LABELS)
+            if l_ref is None:
+                l_ref = block
+            elif block != l_ref:
+                l_moved += 1
+        # LANDER's camera never moves, so `moved` is true here for free and
+        # proves nothing; the row's own ink is the half with the power.  On the
+        # P11 ROM these two rows are plain background -- the ground tiles -- and
+        # a solid tile row is a single colour.
+        check(l_ref is not None and l_flat == 0 and l_moved == 0,
+              "and LANDER's status bar is in the same place, inked, even though "
+              "its world never scrolls to show it up (%d blank rows of %d "
+              "sampled)" % (l_flat, 2 * 16))
+    finally:
+        g2.p.stop()
+
+
 CHECKS = [("p1_boot", p1_boot), ("p2_terrain", p2_terrain),
           ("p3_gravity", p3_gravity), ("p4_thrust", p4_thrust),
           ("p5_landing", p5_landing), ("p6_hud", p6_hud),
           ("p7_sound", p7_sound), ("p9_window", p9_window),
-          ("p10_camera", p10_camera), ("p11_stream", p11_stream)]
+          ("p10_camera", p10_camera), ("p11_stream", p11_stream),
+          ("p12_mode", p12_mode)]
 
 
 def main(rom, mapfile, only=None):

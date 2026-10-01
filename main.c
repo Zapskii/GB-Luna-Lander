@@ -89,6 +89,34 @@
  * 84: a life opens at the top of a world it has to fall through, which is what
  * a descent is, and the streaming is what puts the ground under it on the way
  * down.
+ *
+ * P12 is the MODES and the STATUS BAR.  The title's SELECT really does choose
+ * which game START starts: P9 pointed `terrain` at the profile and P10 took the
+ * world's height from it, so the two modes have been genuinely different worlds
+ * since then -- this is the phase that says so, derives BOTH from the one `pick`
+ * byte at BOOT rather than only at the hand-over, and gives the title's DESCENT
+ * half a game rather than a promise.
+ *
+ * The status bar is the half that had to be rebuilt.  P11's HUD was two rows of
+ * the BG MAP at the camera's own rows, and that is not enough: a BG row is
+ * scrolled by the SAME SCY as the terrain, so its screen position is
+ * `map_row * 8 - SCY`, which is 0 only while `cam % 8 == 0`.  The rest of the
+ * time the strip is clipped by up to seven pixels and, when the map row and SCY
+ * disagree by a tile, carried wholly off the top -- measured on P11's ROM over
+ * 300 DESCENT frames, both HUD rows were up on 197 of them and only the bottom
+ * one on 99.  LANDER never showed it because its camera is pinned at 0.  NO map
+ * row is the right answer; the fix is a POLICY, and the family's is the WINDOW
+ * layer, which SCY does not touch.  So the telemetry is a status bar: win rows
+ * 0-1 at WY = PLAY_H, and the terrain scrolls underneath it untouched.
+ *
+ * TWO THINGS FALL OUT OF THAT.  The first is that the window always runs to the
+ * bottom-right corner, so the bar COVERS the last two rows of background: the
+ * camera's bottom clamp is a bound on what is VISIBLE (sim.h's PLAY_H_PX) and
+ * not on the panel, or the ground at the end of a descent scrolls under the bar
+ * and never comes into view while every frame still looks like a working
+ * camera.  The second is that the ring stops owing anything back -- the HUD no
+ * longer occupies two map rows, so the climb case no longer redraws the row
+ * leaving the strip.
  */
 #include <gb/gb.h>
 #include <stdint.h>
@@ -103,12 +131,33 @@
  * it and the ship draws as garbage; a build error beats that. */
 typedef char ship_frames_fit[(ROT_STEPS <= GFX_SPRITE_COUNT) ? 1 : -1];
 
-/* The visible window: 20x18 tiles, and the ONLY stride in this file.  The 20x18
- * at (0,0) is the whole of what this file writes and, at SCY 0, the whole of
- * what a player sees; the camera below slides the view down the BG map as of
- * P10, and P9's window blit is still what puts tiles under it. */
+/* The background's shape: 20x18 tiles, and the ONLY stride in this file.  The
+ * 20x18 at (0,0) is the whole of what this file writes into the BG map; the
+ * camera below slides the view down it as of P10, and P11's ring is what puts
+ * tiles under the scroll.  As of P12 the last two of those rows are UNDER the
+ * status bar -- see PLAY_H. */
 #define VIEW_W 20
 #define VIEW_H 18
+
+/* THE STATUS BAR, and the visible height it costs the world.
+ *
+ * The telemetry is the WINDOW layer's as of P12 -- WY_REG = PLAY_H -- and a
+ * window is not scrolled by SCY, which is the whole reason the family keeps its
+ * HUD there: a BG strip's screen position is `map_row * 8 - SCY`, so it is
+ * exactly at the top of the screen only while `cam % 8 == 0` and clipped or
+ * carried off the top the rest of the time.  HUD_ROWS is how many window rows
+ * the bar owns; PLAY_H is what is left of the screen for the world.
+ *
+ * PLAY_H IS NOT VIEW_H, and the difference is not cosmetic.  The window always
+ * runs to the bottom-right corner, so its two rows COVER the last two rows of
+ * background: a camera clamped on VIEW_H scrolls two rows of world under the
+ * bar and the ground at the bottom of a descent never comes into view.  VIEW_H
+ * stays the BUFFER's height (what a 20x18 blit writes, and what the ring's own
+ * comments mean by the screen); PLAY_H is the VISIBLE height and is the one
+ * sim.h's camera clamps on.  The tripwire below holds the two in step. */
+#define HUD_ROWS 2
+#define PLAY_H   (VIEW_H - HUD_ROWS)
+typedef char play_h_matches[(PLAY_H * 8 == PLAY_H_PX) ? 1 : -1];
 
 /* The BG map is 32 rows of 32 tiles, and it is the RING the tall world is
  * wound through: 32 rows is 256 px of scroll against a DESCENT world of 808,
@@ -117,11 +166,6 @@ typedef char ship_frames_fit[(ROT_STEPS <= GFX_SPRITE_COUNT) ? 1 : -1];
  * allowed to be one, because here it is the map's size and not the world's
  * (sim.h's world wrap is two compares for exactly that reason). */
 #define MAP_ROWS 32
-
-/* The HUD strip: the rows at the top of the screen the telemetry owns, and so
- * the rows of the map that hold text instead of terrain.  The ring has to know
- * how many they are -- see the climb case in ring_stream(). */
-#define HUD_ROWS 2
 
 /* sim.h has its own copy of the screen height -- it carries the camera and has
  * no gb/gb.h to ask -- and this is the line that keeps the two in step.  A
@@ -147,10 +191,12 @@ typedef char screen_h_matches[(VIEW_H * 8 == SCREEN_H_PX) ? 1 : -1];
 #define ST_TITLE 0
 #define ST_PLAY  1
 
-/* The two modes the title offers.  The DESCENT half is INERT in P6: SELECT
- * flips this byte and the title says so, and nothing else reads it -- M2 is
- * where START starts reading it and the second game exists.  Wiring it here
- * would mean shipping a mode line that promised a game that is not there. */
+/* The two modes the title offers.  This byte was INERT when P6 wrote the title
+ * -- SELECT flipped it and the title said so and nothing else read it -- and it
+ * has not been since P9: START opens the field with field_open(), which points
+ * `terrain` at the profile this byte names, and P10 takes the world's height
+ * from that profile.  Both modes are the same game over two worlds, and the
+ * selection is the only thing that picks between them. */
 #define MODE_LANDER  0
 #define MODE_DESCENT 1
 
@@ -230,24 +276,32 @@ static uint8_t lcdc_at_load;
  * are claims about a value, not about a picture. */
 static uint8_t game;
 
-/* The title's mode selection.  INERT until M2 -- see MODE_* above.
+/* Which world the title's SELECT has chosen.  THE BOOT DEFAULT and the ONLY
+ * mode byte there is: main() writes it once, build_title() reads it for the mode
+ * line, and build_field() reads it for the profile `terrain` points at and the
+ * height the camera clamps against.  See the boot comment in main().
  *
  * `pick` and not `mode`: gb/gb.h declares a mode() of its own (the display-mode
  * request), and the linker sees one symbol, not one per translation unit. */
 static uint8_t pick;
 
-/* The visible screen, 20x18 tile ids, rebuilt from scratch EVERY frame and
- * blitted whole.  ONE buffer for both screens, deliberately: the title is a
- * 20x18 field of tiles and so is the play field, and the only thing a second
- * buffer buys is a way for the two to be filled in the wrong order.
+/* The visible screen, 20x18 tile ids.  ONE buffer for both screens,
+ * deliberately: the title is a 20x18 field of tiles and so is the play field,
+ * and the only thing a second buffer buys is a way for the two to be filled in
+ * the wrong order.
  *
- * The title is built here at boot and blitted before DISPLAY_ON, because "the
- * tiles go up with the display off" is about every byte of the first frame, not
- * just the bank: a map written after the display came on would leave the first
- * frame showing whatever the PPU found in VRAM.  After that the buffer is
- * rewritten in place each tick and the VRAM write happens after wait_vbl_done()
- * -- the sibling's ordering, where the map write lands in the vblank window
- * rather than being dropped by the PPU mid-scanline. */
+ * The TITLE fills all 20x18 and blits it whole, at boot and before DISPLAY_ON,
+ * because "the tiles go up with the display off" is about every byte of the
+ * first frame and not just the bank: a map written after the display came on
+ * would leave the first frame showing whatever the PPU found in VRAM.
+ *
+ * The PLAY FIELD fills only the top HUD_ROWS rows of it -- build_hud() -- and as
+ * of P12 those two rows are blitted into the WINDOW map as the status bar while
+ * P11's ring owns the BG map's rows entirely.  So `bg` is the title's screen and
+ * the play field's status bar, and the terrain is no longer in it at all.  The
+ * buffer is still rewritten in place each tick and the VRAM write still happens
+ * after wait_vbl_done() -- the sibling's ordering, where the map write lands in
+ * the vblank window rather than being dropped by the PPU mid-scanline. */
 static uint8_t bg[VIEW_W * VIEW_H];
 
 /* The camera: the world row, in PIXELS, that the top of the screen shows -- the
@@ -266,9 +320,9 @@ static uint8_t bg[VIEW_W * VIEW_H];
 static uint16_t cam;
 
 /* The ACTIVE world's height in px, taken from the profile being drawn -- see
- * world_extent().  Zero until the first field is built, which needs no special
- * case anywhere: camera_for() answers 0 for a world with no room to scroll, so
- * the title's frames are at SCY 0 by the same rule as everything else. */
+ * world_extent().  main() builds the default field's before the display goes on,
+ * so it is never 0 in play; on the title it describes the mode the title is
+ * offering, which is the same world START would hand over. */
 static uint16_t world_h;
 
 /* One world row of terrain, staged for the map write in ring_stream().
@@ -496,20 +550,22 @@ static void bg_clear(void)
         bg[i] = T_BLANK;
 }
 
-/* FUEL, ALT and the two velocities, over the top two rows of the play field.
- * Those rows are sky in every column -- terrain.h's highest surface is row 9 --
- * so the HUD never covers the ground it is reporting on and nothing under it
- * has to be redrawn.
+/* FUEL, ALT, the two velocities and the target pad, in the window's first two
+ * rows -- the status bar main() puts at the bottom of the screen.
+ *
+ * THE TWO ROWS OF `bg` IT WRITES ARE THE WHOLE OF WHAT THE WORLD LOSES to the
+ * bar, so it is also the reason the camera clamps on PLAY_H_PX and not on the
+ * panel -- see the constants at the top of the file.
  *
  * This, and NOT the whole screen, is what the tick loop rebuilds.  A tilemap
  * write costs the PPU window it has to wait for -- the display is on, so
- * set_bkg_tiles can only put its bytes down in the blanking interval -- and a
+ * set_win_tiles can only put its bytes down in the blanking interval -- and a
  * 20x18 blit measures at about three frames on this machine.  The terrain does
- * not move, so it is written once (build_field(), blitted when the title is
- * cleared) and the 40 tiles that DO change are written every tick, which fits
- * the frame with room to spare.  The tick loop's own frame-rate assertion in
- * probe.p6_hud is what holds that: this is the phase that made the loop draw,
- * so it is the phase that has to keep one iteration equal to one tick.
+ * not move, so it is written once per row by P11's ring and the 40 tiles that DO
+ * change are written every tick, which fits the frame with room to spare.  The
+ * tick loop's own frame-rate assertion in probe.p6_hud is what holds that: P6 is
+ * the phase that made the loop draw, so P6 is the phase that has to keep one
+ * iteration equal to one tick.
  *
  * Every number here is read out of the ship struct the same tick it is drawn --
  * never latched, never a counter of this file's own -- which is why the screen
@@ -521,7 +577,16 @@ static void bg_clear(void)
  * the one `<< 3` out of terrain[]'s tile rows is here, and everywhere else in
  * this file heights stay in the units terrain.h stores them in).  A live
  * altitude, then, and not a depth fallen -- it reads 0 the tick the ship
- * touches down, on a pad or in a crater alike. */
+ * touches down, on a pad or in a crater alike.
+ *
+ * The TARGET PAD is the one indicator that is about the WORLD rather than about
+ * the ship, and it is here because the two modes have to be told apart by more
+ * than which profile got drawn: it is the multiplier sim.h's own pad_mult()
+ * gives the column under the ship's centre, so what it names is the pad the ship
+ * will land on if it keeps falling where it is -- the x1 or x2 pad, or 0 for
+ * ground that is not a landing site at all.  Read through sim.h's rule and not
+ * through a second copy of the pad table here, so the score a landing earns and
+ * the score the bar advertises cannot disagree. */
 static void build_hud(void)
 {
     uint8_t i;
@@ -535,11 +600,11 @@ static void build_hud(void)
     dec(&bg[13], 3, alt);
 
     /* The second row is CLEARED before it is written, and it has to be: its
-     * three readings are not the same length -- "CRASHED" is seven tiles and
-     * "LANDED X2" nine, against the velocity row's thirteen -- so a life that
+     * readings are not the same length -- "CRASHED" is seven tiles and
+     * "LANDED X2" nine, against the velocity row's twenty -- so a life that
      * ends and is restarted would leave the tail of the longer string sticking
-     * out behind the shorter one.  Row 0 is one fixed layout thirteen tiles
-     * wide and has nothing to clear. */
+     * out behind the shorter one.  Row 0 is one fixed layout sixteen tiles wide
+     * and has nothing to clear. */
     for (i = 0; i < VIEW_W; i++)
         bg[VIEW_W + i] = T_BLANK;
 
@@ -552,6 +617,12 @@ static void build_hud(void)
         dec(&bg[VIEW_W + 3], 3, px_per_frame(ship.vx));
         text(bg, 7, 1, "VY ");
         dec(&bg[VIEW_W + 10], 3, px_per_frame(ship.vy));
+        /* Five tiles of label, then a ONE-WIDE digit: dec()'s width is the
+         * whole field, and pad_mult() only ever answers 0, 1 or 2, so one
+         * column is exact for it and a two-wide field would print a leading
+         * blank that the layout below has no room for. */
+        text(bg, 14, 1, "PAD X");
+        dec(&bg[VIEW_W + 19], 1, (int16_t)pad_mult(col));
     } else if (ship.state == ST_LANDED) {
         text(bg, 0, 1, "LANDED X");
         dec(&bg[VIEW_W + 8], 1, (int16_t)ship.mult);
@@ -644,16 +715,15 @@ static void ring_fill(uint8_t top)
  * not complete one tick per emulated frame and did not before this phase --
  * probe.p10_camera says so where it has to allow for it.)
  *
- * THE CLIMB CASE WRITES A SECOND ROW, and it is not decoration.  The HUD is two
- * rows of MAP -- the ring's own slots for the two world rows the camera is
- * sitting on hold telemetry, not terrain -- so walking back UP the world drags
- * a covered slot down out of the strip and into the terrain at screen row
- * HUD_ROWS.  Exactly one row leaves the strip per row the camera climbs, so
- * re-drawing exactly that row keeps pace, and the hole is the one this phase's
- * trap describes: a single stale row that tracks the camera, which reads as a
- * scrolling bug and is an ordering one.  LANDER cannot reach it (its camera is
- * pinned at 0) and a DESCENT life cannot either (it opens at the top), but a
- * ship that thrusts back UP out of a fall is an ordinary thing to do. */
+ * CLIMBING WRITES ONE ROW TOO, and P11 it was two.  The band is always 32 rows
+ * and a climb shifts it UP by one: the row at the top is the one that joins and
+ * the one at the bottom leaves, and they share a map slot, so writing the row
+ * that joins is the whole of it.  P11's second write was the HUD's fault -- the
+ * strip overwrote two slots in the middle of the band, and walking back up
+ * dragged the lower of them out into terrain at screen row 2 -- and as of P12
+ * the telemetry is in the WINDOW layer and no longer touches the BG map at all,
+ * so the band is simply terrain the whole way down and that write is gone with
+ * the bug it existed for. */
 static void ring_stream(void)
 {
     uint8_t top = (uint8_t)(cam >> 3);
@@ -673,7 +743,6 @@ static void ring_stream(void)
     }
     while (ring_top > top) {
         row_blit((uint8_t)(ring_top - 1));          /* ...and climbing */
-        row_blit((uint8_t)(ring_top + HUD_ROWS - 1));
         ring_top--;
     }
 }
@@ -700,9 +769,13 @@ static void ring_stream(void)
  * say so once, and the camera means the offset is a different number every tick
  * -- so the row is the camera's business now and not this function's.
  *
- * M2 is where the descent becomes a game.  What it has as of P11 is the world,
- * the camera and the tiles under both: no spawn and no physics that knows the
- * mode. */
+ * P12 CALLS IT AT BOOT as well as at the hand-over, which is the whole of "a
+ * single `pick` initialiser is the boot default": the mode line on the title,
+ * the profile the renderer and sim.h's collision read, and the world the camera
+ * clamps against are then all derived from one byte from the first tick, rather
+ * than agreeing at the hand-over and nowhere before it.  A probe that pressed
+ * START before looking could not tell those two apart -- which is exactly why
+ * probe.p12_mode boots raw. */
 static void field_open(void)
 {
     terrain = (pick == MODE_DESCENT) ? terrain_descent : terrain_lander;
@@ -722,7 +795,8 @@ static void field_open(void)
  * and the camera would clamp almost at once, which still looks like a camera.
  * The `+ 1` is the tile of ground BENEATH the surface row: a column whose
  * surface is row 100 has its ground at px 768 and its world runs to 808, which
- * is what puts the bottom of the screen on the bottom of the world. */
+ * is what puts the bottom of the world on the last row the player can SEE --
+ * sim.h's PLAY_H_PX above the status bar, not the panel's 144. */
 static uint16_t world_extent(void)
 {
     uint8_t col, deepest = 0;
@@ -852,9 +926,18 @@ void main(void)
     NR50_REG = 0x77;                /* both outputs, full volume */
     NR51_REG = 0xFF;                /* all four channels to both outputs */
 
-    /* The screen machine starts on the title, on the one mode that exists. */
+    /* The screen machine starts on the title, on the mode it offers.  THE
+     * BOOT DEFAULT IS THIS ONE WRITE, and nothing else anywhere names a mode:
+     * build_title() below reads `pick` for the mode line, and build_field()
+     * reads it for the profile the world and the camera are taken from -- so the
+     * title, the terrain and the clamp cannot come out of three different
+     * answers.  probe.p12_mode looks at all three BEFORE pressing anything,
+     * which is the only way a wrong initialiser here is visible at all: a check
+     * that pressed START first would be looking at the hand-over, where
+     * build_field() re-derives the lot. */
     game = ST_TITLE;
     pick = MODE_LANDER;
+    build_field();
 
     /* The ship, before the display goes on.  ship_init() rather than a brace
      * initialiser on the declaration, because START has to reach exactly this
@@ -879,6 +962,30 @@ void main(void)
 
     SHOW_BKG;
     SHOW_SPRITES;
+
+    /* ...and the WINDOW, which is where the telemetry lives as of P12.
+     *
+     * WY is where the window STARTS and it always runs to the bottom-right
+     * corner from there, so the bar is at the BOTTOM of the screen and not the
+     * top: rows PLAY_H..17, which is why the play area is PLAY_H tall and why
+     * sim.h's camera clamps on PLAY_H_PX and not on the panel.  WX = 7 is the
+     * family's value and not a fudge -- a window is drawn from x = WX - 7, so 7
+     * is the widest it can be, and 0 would show none of it.
+     *
+     * THE WINDOW IS NOT SCROLLED BY SCY, and that is the entire reason it is
+     * here rather than in the BG map P11 used: a BG strip's screen y is
+     * `map_row * 8 - SCY`, so it sits at the top of the screen only while
+     * `cam % 8 == 0` and is clipped or lost off the top the rest of the time.
+     *
+     * SHOW_WIN rather than HIDE_WIN/SHOW_WIN around the title: the window map is
+     * zeroed at power-up and tile 0 is T_BLANK, which is the paper the title is
+     * already drawn on, so the bar's two rows are invisible over the title and
+     * there is no state here to get wrong.  GBDK's crt0 already leaves LCDC bit 6
+     * set -- the window's own 0x9C00 map, which is what set_win_tiles writes --
+     * so nothing here has to say so. */
+    WX_REG = 7;
+    WY_REG = PLAY_H * 8;
+    SHOW_WIN;
 
     /* GBDK does NOT copy the shadow OAM to 0xFE00 unless a VBL handler is
      * running, and crt0 leaves IE masked -- so without this the sprite exists
@@ -1061,27 +1168,27 @@ void main(void)
                 ring_stream();
             }
 
-            /* ...and the HUD LAST, at the map rows the CAMERA puts it on.  The
-             * strip is two rows of MAP, so it can only be at the top of the
-             * SCREEN if it moves with the scroll: rows 0 and 1 of the map are
-             * the top of the picture only while the camera is at a multiple of
-             * 32 rows, and a HUD pinned there scrolls up the screen and wraps
-             * round the bottom of the world.  Two single-row writes rather than
-             * one two-row write because `cam_row + 1` wraps to map row 0 at the
-             * end of the ring, and one rectangular write across that seam is
-             * two writes whatever it is spelled as.
+            /* ...and the HUD, into the WINDOW map and nowhere near the scroll.
              *
-             * LAST and not first: ring_stream()'s climb case re-draws the row
-             * leaving the strip, and at the TOP of the world the row the band
-             * uncovers is the strip's own -- so the HUD has to be the write
-             * that wins.  The tilemap this lands in is the one the NEXT frame's
+             * P11 wrote these two rows into the BG map at the rows the CAMERA
+             * puts them on, and that is the thing this phase exists to undo: a
+             * BG row is scrolled by the same SCY as the terrain, so its screen
+             * position is `map_row * 8 - SCY` and it is at the top of the
+             * picture only while `cam % 8 == 0`.  Rows 0 and 1 of the WINDOW map
+             * are screen rows PLAY_H and PLAY_H + 1 whatever SCY says -- the
+             * window is not scrolled at all -- which is the whole of the fix,
+             * and the reason no offset into the BG map was ever going to be
+             * one.
+             *
+             * LAST, and it can be now: two writes into a map the ring never
+             * touches cannot race it, and there is no `cam_row + 1` wrapping to
+             * map row 0 across the ring's seam either, because the window map
+             * has no seam.  The tilemap this lands in is the one the NEXT frame's
              * reads see, which is the same one-vblank relationship the shadow
              * OAM has had since P3 -- and the reason probe.p6_hud allows the
              * screen's numbers to be one tick behind the state's. */
-            set_bkg_tiles(0, (uint8_t)((cam >> 3) & (MAP_ROWS - 1)),
-                          VIEW_W, 1, bg);
-            set_bkg_tiles(0, (uint8_t)(((cam >> 3) + 1) & (MAP_ROWS - 1)),
-                          VIEW_W, 1, &bg[VIEW_W]);
+            set_win_tiles(0, 0, VIEW_W, 1, bg);
+            set_win_tiles(0, 1, VIEW_W, 1, &bg[VIEW_W]);
         }
     }
 }

@@ -131,6 +131,20 @@ typedef char thrust_fits_int16[(THRUST <= 127) ? 1 : -1];
  * that keeps this equal to its own VIEW_H. */
 #define SCREEN_H_PX 144
 
+/* WHAT THE CAMERA MAY ACTUALLY SHOW, and it is NOT the panel.  As of P12 the
+ * telemetry is a status bar in the WINDOW layer at the bottom of the screen:
+ * the window always runs to the bottom-right corner, so its two rows cover the
+ * last two rows of background, and the player sees 128 px of world and not 144.
+ *
+ * The clamp below is a bound on the VIEW and not on the world, which is why this
+ * number and not SCREEN_H_PX is the one it uses.  A clamp at 144 lets the camera
+ * scroll two rows of world under the status bar: in a 101-row descent that is
+ * exactly the rows the ground is on, so the surface never comes into view at the
+ * end of a fall -- and every frame on the way down still looks like a working
+ * camera.  The two constants are separate so they cannot be confused; main.c's
+ * PLAY_H is the rows and this is the pixels, and a tripwire there holds them. */
+#define PLAY_H_PX 128
+
 /* Where on the screen the camera holds the ship: the upper THIRD.  The ship
  * rides there rather than centring, so a descent reads as forward motion and
  * the two thirds below it are ground the ship has not reached yet.  A third of
@@ -156,12 +170,13 @@ typedef char thrust_fits_int16[(THRUST <= 127) ? 1 : -1];
  * 256: a camera clamped to the map stops when the ship still has 600 px to
  * fall, so the ground never comes into view and the last stretch of every
  * descent is invisible -- while the scroll itself looks perfectly correct for
- * the first 160 px.  The bound is `world_h - SCREEN_H_PX`: the greatest offset
- * at which the world's LAST row is still on the screen.
+ * the first 160 px.  The bound is `world_h - PLAY_H_PX`: the greatest offset at
+ * which the world's LAST row is still in the VISIBLE band -- see PLAY_H_PX,
+ * which is the panel minus the status bar and not the panel.
  *
- * A world SHORTER than a screen (LANDER's is one screen and its profile ends at
- * row 12) has nowhere to scroll, and `world_h > SCREEN_H_PX` is what makes the
- * bound 0 there instead of a ~65000 unsigned wrap -- the same underflow the
+ * A world SHORTER than the visible band (LANDER's is one screen and its profile
+ * ends at row 12) has nowhere to scroll, and `world_h > PLAY_H_PX` is what makes
+ * the bound 0 there instead of a ~65000 unsigned wrap -- the same underflow the
  * ceiling guard in ship_step() exists to prevent.  The TOP bound is the same
  * hazard from the other end: `ship_y - CAM_ANCHOR` at the top of the world goes
  * negative, and one `>` is what keeps it 0 rather than 65000, which the min
@@ -172,7 +187,7 @@ typedef char thrust_fits_int16[(THRUST <= 127) ? 1 : -1];
 static uint16_t camera_for(uint16_t ship_y, uint16_t world_h)
 {
     uint16_t top = (ship_y > CAM_ANCHOR) ? (uint16_t)(ship_y - CAM_ANCHOR) : 0;
-    uint16_t bottom = (world_h > SCREEN_H_PX) ? (uint16_t)(world_h - SCREEN_H_PX) : 0;
+    uint16_t bottom = (world_h > PLAY_H_PX) ? (uint16_t)(world_h - PLAY_H_PX) : 0;
 
     return (top < bottom) ? top : bottom;
 }

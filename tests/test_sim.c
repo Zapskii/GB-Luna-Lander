@@ -543,12 +543,19 @@ int main(void)
          * The two worlds are the ROM's own: DESCENT's is three screens tall and
          * is the only one with anywhere to scroll, and LANDER's is under one
          * screen and must therefore never scroll at all.  `bottom` is the
-         * world's bound, 664 px -- the map's 256 would be 112, and the two
+         * world's bound, 680 px -- the map's 256 would be 112, and the two
          * differ by the six hundred px of ground a map-clamped view never
-         * reaches. */
+         * reaches.
+         *
+         * It is the VISIBLE band's bound and not the panel's: P12's status bar
+         * covers the last two rows of the screen, so the camera clamps on
+         * PLAY_H_PX (128) and not on SCREEN_H_PX (144), and a bound taken on the
+         * panel would leave the world's last two rows scrolled under the bar and
+         * never seen.  The two differ by 16 px here and would differ by a whole
+         * bottom row of world there. */
         const uint16_t tall = 808;      /* DESCENT: deepest row 100, +1 tile  */
         const uint16_t flat = 104;      /* LANDER:  deepest row 12,  +1 tile  */
-        const uint16_t bottom = tall - SCREEN_H_PX;
+        const uint16_t bottom = tall - PLAY_H_PX;
         uint16_t y, cam, want, prev = 0;
         uint16_t off = 0, back = 0, third = 0, top = 0, bot = 0;
 
@@ -623,6 +630,61 @@ int main(void)
         check(SCREEN_H_PX == 144 && CAM_ANCHOR == 48 && CAM_ANCHOR * 3 == SCREEN_H_PX,
               "the screen is the DMG's 144 px and the anchor is a third of it "
               "(%d, %d)", SCREEN_H_PX, CAM_ANCHOR);
+    }
+
+    /* ----------------------------------------------------------- P12 ---- */
+
+    {
+        /* THE BOTTOM BOUND IS ON WHAT IS VISIBLE, not on the panel.  P12's
+         * telemetry is a WINDOW at the bottom of the screen, and a window always
+         * runs to the bottom-right corner -- so the last rows of background are
+         * COVERED and the camera has no business scrolling world into them.
+         *
+         * The failure this pins is silent.  A clamp two rows too generous leaves
+         * the world's last rows under the status bar, so the ground at the end of
+         * a descent never comes into view while every frame on the way down still
+         * looks like a working camera.  `tall` is the ROM's own DESCENT world,
+         * whose deepest surface row is 100, so the rows the bar would hide are
+         * exactly rows 100 and 101 -- the ground. */
+        const uint16_t tall = 808;                  /* DESCENT, as in P10 */
+        const uint16_t vis_bound = tall - PLAY_H_PX;
+        const uint16_t panel_bound = tall - SCREEN_H_PX;
+
+        check(PLAY_H_PX < SCREEN_H_PX && (SCREEN_H_PX - PLAY_H_PX) % 8 == 0 &&
+              CAM_ANCHOR < PLAY_H_PX,
+              "the visible band is the panel minus whole status-bar rows and the "
+              "ship still rides in the upper part of it (%d px of %d, %d rows "
+              "less; anchor %d)",
+              PLAY_H_PX, SCREEN_H_PX, (SCREEN_H_PX - PLAY_H_PX) / 8, CAM_ANCHOR);
+
+        /* At the bound, the world's LAST row is the last row the player can
+         * see.  One px short of the world's end so the camera is unambiguously
+         * past its free window and onto the clamp. */
+        check(camera_for((uint16_t)(tall - 1), tall) == vis_bound &&
+              vis_bound + PLAY_H_PX == tall,
+              "at the bottom bound the world's last row is the last VISIBLE row "
+              "(cam %u, world %d px, visible to %u)",
+              camera_for((uint16_t)(tall - 1), tall), tall,
+              vis_bound + PLAY_H_PX);
+
+        /* ...and the rows the PANEL's bound would hide are the ground.  Stated
+         * as "the world's end is under the bar" rather than as an offset, because
+         * that is what the bug is: at 664 the band stops 16 px short of the
+         * world, and those 16 px are the last two tile rows of DESCENT. */
+        check(panel_bound + PLAY_H_PX < tall && vis_bound + PLAY_H_PX >= tall,
+              "the panel's bound %u would leave the world's last 16 px (%d px) "
+              "scrolled under the bar, where the visible bound %u does not "
+              "(visible to px %u against %u)",
+              panel_bound, tall, vis_bound, vis_bound + PLAY_H_PX,
+              panel_bound + PLAY_H_PX);
+
+        /* A world no taller than the visible band still has nowhere to scroll --
+         * LANDER's is 104 px -- so the `>` that guards the subtraction has to
+         * hold at the NEW bound too and not only at the old one. */
+        check(camera_for(120, 104) == 0 && camera_for(120, PLAY_H_PX) == 0 &&
+              camera_for(PLAY_H_PX, PLAY_H_PX) == 0,
+              "a world no taller than the visible band never scrolls, and the "
+              "bound is 0 rather than a ~65000 wrap");
     }
 
     if (failed) {
