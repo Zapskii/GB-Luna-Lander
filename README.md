@@ -1,4 +1,4 @@
-[Play online at retro.zapski.com](https://retro.zapski.com)
+🎮 [Play online](https://retro.zapski.com/play/luna-lander) · 📖 [Read the review](https://retro.zapski.com/blog/luna-lander-game-boy-review) · [retro.zapski.com](https://retro.zapski.com)
 
 # LUNA LANDER
 
